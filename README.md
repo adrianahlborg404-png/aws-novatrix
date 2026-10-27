@@ -222,6 +222,35 @@ Förväntat slut: `Sammanfattning: 16 OK, 0 FEL`.
 
 Behörigheterna kan också granskas i konsolen under **IAM → Roles → novatrix-deploy-role → Permissions**, och med Policy Simulator.
 
+### Problem jag stötte på: nya nycklar fungerade inte direkt
+
+Första gången jag körde `verify.sh` blev resultatet **15 OK, 1 FEL**:
+
+```
+==> 2/4 anna-drift (grupp novatrix-drift)
+  Lista EC2-instanser i Stockholm      forvantat TILLATET  fick NEKAT     [FEL]
+  Lista EC2-instanser i us-east-1      forvantat NEKAT     fick NEKAT     [OK]
+  Stoppa Novatrix-instansen (dry-run)  forvantat TILLATET  fick TILLATET  [OK]
+```
+
+**Felsökning.** Policyn kunde inte vara fel. anna fick stoppa instansen i testet direkt efter, och det kräver samma grupp och samma policy. Felet låg alltså i *när* anropet gjordes, inte i *vad* som var tillåtet.
+
+**Orsak.** `verify.sh` skapar en ny access key åt anna och väntade bara tills STS (`sts get-caller-identity`) godkände den. IAM är *eventually consistent*: en ny nyckel sprids till AWS-tjänsterna under några sekunder, och EC2 hade ännu inte fått den. Det första EC2-anropet svarade därför `AuthFailure`. Skriptet tolkade det som nekat, men det var egentligen "okänd nyckel". Några sekunder senare fungerade samma nyckel.
+
+**Lösning.** `verify.sh` väntar nu tills EC2 svarar med något annat än `AuthFailure` innan testerna börjar:
+
+```bash
+for i in $(seq 1 20); do
+  ut=$(som ec2 describe-instances --dry-run 2>&1)
+  [[ "$ut" == *AuthFailure* || "$ut" == *"validate the provided access credentials"* ]] || return 0
+  sleep 3
+done
+```
+
+Efter ändringen gav samma miljö **16 OK, 0 FEL**. Ingen policy behövde ändras.
+
+**Lärdom.** Ett nekat anrop kan ha två helt olika orsaker: `UnauthorizedOperation`/`AccessDenied` betyder att policyn nekar, `AuthFailure` att AWS inte känner igen identiteten. Skript som skapar IAM-resurser och direkt använder dem måste vänta in spridningen. Samma sak gäller `deploy.sh`, som försöker starta instansen igen om instance profile inte syns för EC2 än.
+
 ### Ta bort miljön
 
 ```bash
@@ -281,3 +310,5 @@ v43/
 **v43: Att least privilege handlar om resurser och villkor, inte bara actions.** `s3:GetObject` på `*` och på `bucket/webb/*` är samma action men helt olika risk. Taggar och region som villkor gör att samma policy fungerar när fler system tillkommer.
 
 **v43: Att verifiera nekat är lika viktigt som tillåtet.** Ett test som bara visar att något fungerar säger inget om least privilege. Därför testar `verify.sh` varje roll både mot det den ska få och det den inte ska få.
+
+**v43: Att IAM är eventually consistent.** En ny access key godkändes av STS direkt men avvisades av EC2 några sekunder till. Ett nekat anrop behöver därför inte betyda fel policy. Felkoden skiljer `AuthFailure` (okänd identitet) från `UnauthorizedOperation` (nekad av policy).
