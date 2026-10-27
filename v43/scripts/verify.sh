@@ -59,7 +59,14 @@ logga_in_som() {  # anvandare -> satter AK och SK
   read -r AK SK < <(aws iam create-access-key --user-name "$1" \
     --query 'AccessKey.[AccessKeyId,SecretAccessKey]' --output text)
   NYCKLAR+=("$1:$AK")
-  for i in $(seq 1 10); do som sts get-caller-identity >/dev/null 2>&1 && return; sleep 3; done
+  # En ny nyckel godkanns av STS direkt men kan ta nagra sekunder innan EC2 kanner igen den.
+  # Vanta tills EC2 svarar med nagot annat an AuthFailure (tillatet eller nekat spelar ingen roll).
+  local ut
+  for i in $(seq 1 20); do
+    ut=$(som ec2 describe-instances --dry-run 2>&1)
+    [[ "$ut" == *AuthFailure* || "$ut" == *"validate the provided access credentials"* ]] || return 0
+    sleep 3
+  done
 }
 
 # ---------- 1. EC2-instansens roll ----------
