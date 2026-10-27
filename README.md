@@ -220,6 +220,14 @@ Förväntat slut: `Sammanfattning: 16 OK, 0 FEL`.
 
 `--dry-run` på EC2 betyder att AWS kontrollerar behörigheten utan att utföra anropet: svaret `DryRunOperation` betyder tillåtet, `UnauthorizedOperation` nekat. Instansen stoppas alltså aldrig på riktigt.
 
+### Visa vad som är uppsatt
+
+```bash
+bash visa-iam.sh | tee iam-oversikt.txt
+```
+
+Skriptet ändrar ingenting. Det hämtar från AWS och skriver ut varje grupp med medlemmar och fullständiga policies, användarna (grupp, tagg, att de saknar lösenord och nycklar), varje roll med trust policy (*vem* får anta den) och behörigheter (*vad* den får göra), EC2-instansens roll och IMDSv2-inställning samt bucketens blockering av publik åtkomst. Konto-ID maskeras. `tee` sparar samtidigt utskriften till `iam-oversikt.txt`, som kan laddas ner från CloudShell via **Actions → Download file**.
+
 Behörigheterna kan också granskas i konsolen under **IAM → Roles → novatrix-deploy-role → Permissions**, och med Policy Simulator.
 
 ### Problem jag stötte på: nya nycklar fungerade inte direkt
@@ -267,6 +275,7 @@ Tar bort instansen, security group, key pair, roller, instance profile, använda
 | [`v43/scripts/deploy.sh`](v43/scripts/deploy.sh) | CloudShell | Som v42, men startar instansen med instance profile `novatrix-web-role` och IMDSv2 |
 | [`v43/scripts/user-data.sh`](v43/scripts/user-data.sh) | Instansen, vid första start | Installerar Apache, hämtar webbsidan från S3, startar synk-timern, testar rollens behörigheter |
 | [`v43/scripts/verify.sh`](v43/scripts/verify.sh) | CloudShell | Testar alla identiteter och hela kedjan, skriver OK/FEL per test |
+| [`v43/scripts/visa-iam.sh`](v43/scripts/visa-iam.sh) | CloudShell | Skriver ut alla grupper, användare, roller och policies som de ligger i AWS |
 | [`v43/scripts/teardown.sh`](v43/scripts/teardown.sh) | CloudShell | Tar bort allt i omvänd ordning |
 | [`v43/policies/*.json`](v43/policies) | – | Behörighets- och trust-policies som mallar |
 
@@ -286,6 +295,7 @@ v43/
     ├── deploy.sh
     ├── user-data.sh
     ├── verify.sh
+    ├── visa-iam.sh
     └── teardown.sh
 ```
 
