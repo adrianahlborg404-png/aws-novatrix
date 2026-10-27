@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FarBaraAntaDeployRollen",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::__KONTO__:role/novatrix-deploy-role"
+    }
+  ]
+}

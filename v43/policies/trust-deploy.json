@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BaraTeamUtvecklingIKontot",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::__KONTO__:root" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "aws:PrincipalTag/team": "utveckling" }
+      }
+    }
+  ]
+}
