@@ -53,8 +53,9 @@ aws logs filter-log-events --log-group-name "$LOGG" --start-time "$START" \
       k = n SUBSEP $13 SUBSEP proto($8) SUBSEP $7
       in_n[k]++; if (!((k, $4) in in_s)) { in_s[k, $4] = 1; in_u[k]++ }
     }
-    # Utgaende: anslutningar som vara servrar sjalva startar (lag dport)
-    if ($4 == egen($3) && $7 < 32768) {
+    # Utgaende: anslutningar som servern sjalv startar. Da ar kallporten en hog
+    # ephemeral-port (>= 1024). Svar fran 22/80/443 till klienter raknas inte.
+    if ($4 == egen($3) && $6 >= 1024 && $7 < 32768) {
       k = n SUBSEP $13 SUBSEP proto($8) SUBSEP $7 SUBSEP (namn($5) != "" ? namn($5) : $5)
       ut_n[k]++
     }
