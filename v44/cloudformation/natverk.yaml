@@ -360,6 +360,7 @@ Outputs:
   DbSubnetIds:    { Value: !Join [",", [!Ref DbSubnetA, !Ref DbSubnetB]] }
   PrivateRouteTableId: { Value: !Ref PrivateRouteTable }
   WebNaclId:      { Value: !Ref WebNacl }
+  MgmtNaclId:     { Value: !Ref MgmtNacl }
   WebSgId:        { Value: !Ref WebSg }
   BastionSgId:    { Value: !Ref BastionSg }
   DbSgId:         { Value: !Ref DbSg }

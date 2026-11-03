@@ -23,6 +23,7 @@ ut() { aws cloudformation describe-stacks --stack-name "$STACK" \
 VPC_ID=$(ut VpcId)
 [ -n "$VPC_ID" ] && [ "$VPC_ID" != "None" ] || { echo "Stacken $STACK saknas. Kor deploy.sh forst."; exit 1; }
 WEB_SG=$(ut WebSgId); WEB_NACL=$(ut WebNaclId); DB_SG=$(ut DbSgId)
+BASTION_SG=$(ut BastionSgId); MGMT_NACL=$(ut MgmtNaclId)
 DB_PORT=$(ut DbPort); ADMIN_IP=$(ut AdminIp); PRIV_RT=$(ut PrivateRouteTableId)
 
 instans() {  # namn falt
@@ -71,8 +72,16 @@ pa_webb() { ssh "${SSH_OPT[@]}" -o ProxyCommand="ssh ${SSH_OPT[*]} -W %h:%p ec2-
   "ec2-user@$WEB_PRIV" "$@"; }
 
 # Tillfalliga regler i steg 4 tas alltid bort, aven om skriptet avbryts
-SG_OPPEN=0; NACL_OPPEN=0
+SG_OPPEN=0; NACL_OPPEN=0; CS_OPPEN=0
+stang_cloudshell() {  # tar bort CloudShells tillfalliga vag in till bastion
+  aws ec2 revoke-security-group-ingress --group-id "$BASTION_SG" \
+    --protocol tcp --port 22 --cidr "${CS_IP}/32" >/dev/null 2>&1
+  aws ec2 delete-network-acl-entry --network-acl-id "$MGMT_NACL" --ingress --rule-number 90 >/dev/null 2>&1
+  aws ec2 delete-network-acl-entry --network-acl-id "$MGMT_NACL" --egress  --rule-number 90 >/dev/null 2>&1
+  CS_OPPEN=0
+}
 stada() {
+  [ "$CS_OPPEN" = 1 ] && stang_cloudshell && echo "==> CloudShells tillfalliga SSH-atkomst till bastion borttagen"
   [ "$SG_OPPEN" = 1 ] && aws ec2 revoke-security-group-ingress --group-id "$WEB_SG" \
     --protocol tcp --port 22 --cidr "${CS_IP}/32" >/dev/null 2>&1
   [ "$NACL_OPPEN" = 1 ] && aws ec2 delete-network-acl-entry --network-acl-id "$WEB_NACL" \
@@ -102,18 +111,30 @@ resultat "Annan port 8080"                         BLOCKERAT "$(tcp "$WEB_IP" 80
 # ---------- 2. Internet -> bastion ----------
 echo ""
 echo "==> 2/5 Fran internet till bastion"
-ADMIN=0; [ "$CS_IP" = "$ADMIN_IP" ] && ADMIN=1
-if [ "$ADMIN" = 1 ]; then
+if [ "$CS_IP" = "$ADMIN_IP" ]; then
   resultat "SSH 22 fran admin-IP (CloudShell)"     TILLATET  "$(tcp "$BASTION_IP" 22)"
 else
-  resultat "SSH 22 fran IP som inte ar admin-IP"   BLOCKERAT "$(tcp "$BASTION_IP" 22)"
+  # Admin-IP ar din dator. CloudShell ar en annan IP och ska stoppas.
+  resultat "SSH 22 fran CloudShell (inte admin-IP)" BLOCKERAT "$(tcp "$BASTION_IP" 22)"
 fi
 resultat "HTTP 80 till bastion"                    BLOCKERAT "$(tcp "$BASTION_IP" 80)"
 
 # ---------- 3. Inifran via bastion ----------
 echo ""
 echo "==> 3/5 Inifran, via bastion"
-if [ "$ADMIN" = 1 ] && [ -f "$KEY_FIL" ]; then
+if [ "$CS_IP" != "$ADMIN_IP" ]; then
+  # Samma tva lager som for admin-IP:n, men bara for CloudShell och bara under testet
+  echo "    Oppnar tillfalligt SSH till bastion for CloudShell ($CS_IP), stangs efter del 3"
+  CS_OPPEN=1
+  aws ec2 authorize-security-group-ingress --group-id "$BASTION_SG" \
+    --protocol tcp --port 22 --cidr "${CS_IP}/32" >/dev/null
+  aws ec2 create-network-acl-entry --network-acl-id "$MGMT_NACL" --ingress --rule-number 90 \
+    --protocol tcp --port-range From=22,To=22 --cidr-block "${CS_IP}/32" --rule-action allow
+  aws ec2 create-network-acl-entry --network-acl-id "$MGMT_NACL" --egress --rule-number 90 \
+    --protocol tcp --port-range From=1024,To=65535 --cidr-block "${CS_IP}/32" --rule-action allow
+  vanta_tcp TILLATET "$BASTION_IP" 22 >/dev/null
+fi
+if [ -f "$KEY_FIL" ]; then
   r=$(pa_webb true >/dev/null 2>&1 && echo TILLATET || echo BLOCKERAT)
   resultat "SSH bastion -> webbserverns privata IP"  TILLATET  "$r"
   resultat "Bastion -> webb HTTP 80 (privat IP)"     BLOCKERAT "$(pa_bastion "$TCP_TEST $WEB_PRIV 80")"
@@ -123,8 +144,11 @@ if [ "$ADMIN" = 1 ] && [ -f "$KEY_FIL" ]; then
   resultat "Webb -> internet SSH 22"                 BLOCKERAT "$(pa_webb "$TCP_TEST github.com 22")"
   resultat "Webb -> bastion SSH 22 (bakvagen)"       BLOCKERAT "$(pa_webb "$TCP_TEST $BASTION_PRIV 22")"
 else
-  echo "  Hoppar over: CloudShell ($CS_IP) ar inte admin-IP ($ADMIN_IP) eller nyckeln saknas."
-  echo "  Kor 'bash deploy.sh' utan IP-argument for att gora CloudShell till admin-IP."
+  echo "  Hoppar over: nyckeln $(basename "$KEY_FIL") saknas i den har mappen."
+fi
+if [ "$CS_OPPEN" = 1 ]; then
+  stang_cloudshell
+  resultat "SSH fran CloudShell efter att regeln togs bort" BLOCKERAT "$(vanta_tcp BLOCKERAT "$BASTION_IP" 22)"
 fi
 
 # ---------- 4. Ett lager i taget ----------

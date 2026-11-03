@@ -7,9 +7,10 @@
 #    fran v43) och en bastion i mgmt-subnatet.
 # Kor v43/scripts/iam-setup.sh forst (S3-bucket och webb-rollen).
 #
-#   bash deploy.sh [ADMIN-IP]
-#   ADMIN-IP = IP som far SSH:a till bastion. Utelamnad anvands
-#   CloudShells egen IP, sa att verify.sh kan testa SSH-vagen.
+#   bash deploy.sh <DIN-PUBLIKA-IP>
+#   Din dators publika IP blir admin-IP, den enda som far SSH:a
+#   till bastion. Utelamnad ateranvands IP:n som redan finns i
+#   stacken, och forsta gangen CloudShells egen IP.
 # =============================================================
 set -euo pipefail
 
@@ -37,13 +38,17 @@ aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null || {
 echo "    OK: $PROFIL och s3://novatrix-webb-<konto-id>"
 
 echo "==> 2/7 Admin-IP"
-ADMIN_IP="${1:-$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]')}"
-[[ "$ADMIN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "    Ogiltig IP: $ADMIN_IP"; exit 1; }
-if [ -z "${1:-}" ]; then
-  echo "    $ADMIN_IP (CloudShells IP, ingen IP angavs)"
+NUVARANDE=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+  --query "Stacks[0].Parameters[?ParameterKey=='AdminIp'].ParameterValue" --output text 2>/dev/null || true)
+if [ -n "${1:-}" ]; then
+  ADMIN_IP="$1";         KALLA="angiven"
+elif [[ "$NUVARANDE" =~ ^[0-9.]+$ ]]; then
+  ADMIN_IP="$NUVARANDE"; KALLA="samma som forut i stacken"
 else
-  echo "    $ADMIN_IP"
+  ADMIN_IP=$(curl -s https://checkip.amazonaws.com | tr -d '[:space:]'); KALLA="CloudShells IP, ingen IP angavs"
 fi
+[[ "$ADMIN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "    Ogiltig IP: $ADMIN_IP"; exit 1; }
+echo "    $ADMIN_IP ($KALLA)"
 
 echo "==> 3/7 Natverk fran kod: CloudFormation-stack $STACK"
 echo "    (forsta gangen tar det 2-3 minuter)"
@@ -141,8 +146,21 @@ echo ""
 echo "    Webbsida:  http://$WEB_IP  och  https://$WEB_IP  (ge user data 2 minuter)"
 echo "    Natinfo:   http://$WEB_IP/natverk.txt"
 echo "    Bastion:   $BASTION_IP (SSH bara fran $ADMIN_IP)"
-echo "    SSH till webbservern via bastion:"
-echo "      ssh -i ${KEY_NAME}.pem -o ProxyCommand=\"ssh -i ${KEY_NAME}.pem -W %h:%p ec2-user@$BASTION_IP\" ec2-user@$WEB_PRIV"
+echo ""
+echo "    SSH fran din dator: ladda ner ${KEY_NAME}.pem (Actions -> Download file),"
+echo "    lagg den i C:\\Users\\<du>\\.ssh\\ och lagg till i C:\\Users\\<du>\\.ssh\\config:"
+echo ""
+echo "      Host novatrix-bastion"
+echo "        HostName $BASTION_IP"
+echo "        User ec2-user"
+echo "        IdentityFile ~/.ssh/${KEY_NAME}.pem"
+echo "      Host novatrix-web"
+echo "        HostName $WEB_PRIV"
+echo "        User ec2-user"
+echo "        IdentityFile ~/.ssh/${KEY_NAME}.pem"
+echo "        ProxyJump novatrix-bastion"
+echo ""
+echo "    Sedan i PowerShell: ssh novatrix-web"
 echo ""
 echo "    Verifiera trafiken: bash verify.sh"
 echo "    Visa flow logs:     bash visa-trafik.sh"

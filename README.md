@@ -337,7 +337,7 @@ Det som gör ett subnät publikt är route table-raden mot internet gateway, int
 | 1. Subnät och routing | Publika och privata subnät, privata saknar route till internet | Att databasen exponeras mot internet, även om någon av misstag ger den en publik IP eller en öppen security group. Utan route finns ingen väg in eller ut. |
 | 2. NACL per subnät | Stateless filter på subnätsgränsen, kan *neka* | Felkonfigurerade security groups (t.ex. port 22 öppnad för `0.0.0.0/0`), skanning av portar som inte används, och nya instanser som startas med fel security group i subnätet. |
 | 3. Security group per instans | Stateful filter, bara tillåt, kan peka på andra security groups | Lateral rörelse inne i VPC:t: webbservern når bara databasen, bastion når bara webbservern på port 22, databasen når ingenting. Begränsar också vart en hackad webbserver kan ansluta ut: bara 443 och databasen, inte SSH eller andra portar. |
-| 4. Bastion | Enda vägen in för SSH, från en IP | Brute force och sårbarheter i SSH på webbservern, som aldrig exponerar port 22 mot internet. Bastion har ingen IAM-roll och ingen väg ut, så den är värdelös för en angripare som tar sig in. Nyckeln stannar i CloudShell (`ProxyCommand -W`), den kopieras aldrig till bastion. |
+| 4. Bastion | Enda vägen in för SSH, från en IP | Brute force och sårbarheter i SSH på webbservern, som aldrig exponerar port 22 mot internet. Bastion har ingen IAM-roll och ingen väg ut, så den är värdelös för en angripare som tar sig in. Bara admin-IP:n (min dator) släpps in. Nyckeln stannar på datorn (`ProxyJump`) och kopieras aldrig till bastion. |
 | 5. IAM (från v43) | Webbserverns roll får bara läsa `webb/*` i S3, IMDSv2 krävs | Att en hackad webbserver kan nå andra AWS-resurser. |
 | 6. VPC Flow Logs | Loggar ACCEPT och REJECT för hela VPC:t | Att intrång och skanning går obemärkt förbi. Visar i efterhand vem som försökt nå vad. |
 
@@ -402,29 +402,56 @@ Säkerhetsgrupper som pekar på varandra (bastion → webb → databas) skapar c
 
 ### Skapa miljön
 
-I **CloudShell**:
+1. Ta reda på din dators publika IP. Den blir **admin-IP**, den enda adress som får SSH:a till bastion. I PowerShell:
 
-```bash
-git clone https://github.com/adrianahlborg404-png/aws-novatrix.git
-cd aws-novatrix/v43/scripts
-bash iam-setup.sh            # S3-bucket och novatrix-web-role från v43 (tål att köras igen)
-cd ../../v44/scripts
-bash deploy.sh               # nätverksstacken + webbserver + bastion
-```
+   ```powershell
+   curl.exe ifconfig.me
+   ```
 
-Utan argument blir CloudShells egen IP admin-IP, så att `verify.sh` kan testa SSH-vägen via bastion. Vill du SSH:a från din egen dator, kör `bash deploy.sh <DIN-PUBLIKA-IP>`. Stacken uppdateras och den gamla IP:n förlorar åtkomst.
+2. I **CloudShell**:
+
+   ```bash
+   git clone https://github.com/adrianahlborg404-png/aws-novatrix.git
+   cd aws-novatrix/v43/scripts
+   bash iam-setup.sh                  # S3-bucket och novatrix-web-role från v43 (tål att köras igen)
+   cd ../../v44/scripts
+   bash deploy.sh <DIN-PUBLIKA-IP>    # nätverksstacken + webbserver + bastion
+   ```
+
+IP:n skrivs bara på kommandoraden och sparas som parameter i stacken, aldrig i repot. Körs `deploy.sh` igen utan argument behålls admin-IP:n som redan finns i stacken. Har din IP ändrats (ny router eller annat nät) kör du `bash deploy.sh <NY-IP>`. Stacken uppdateras, och den gamla IP:n förlorar åtkomst direkt.
 
 Kör `bash teardown.sh` i `v43/scripts` först om v43-instansen fortfarande finns.
 
-### SSH till webbservern via bastion
+### SSH från din dator via bastion
 
-```bash
-ssh -i novatrix-v44-key.pem \
-  -o ProxyCommand="ssh -i novatrix-v44-key.pem -W %h:%p ec2-user@<BASTION-IP>" \
-  ec2-user@<WEBBSERVERNS-PRIVATA-IP>
-```
+1. Ladda ner nyckeln från CloudShell: **Actions → Download file**, sökväg `aws-novatrix/v44/scripts/novatrix-v44-key.pem`. Lägg den i `C:\Users\<du>\.ssh\`.
+2. Lås filen så att bara du kan läsa den, annars vägrar OpenSSH att använda den. I PowerShell:
 
-`deploy.sh` skriver ut kommandot med rätt IP:n. `-W` gör att bastion bara vidarebefordrar TCP-trafiken. Nyckeln och SSH-sessionen till webbservern stannar i CloudShell, och ingen agent forwarding används.
+   ```powershell
+   icacls "$env:USERPROFILE\.ssh\novatrix-v44-key.pem" /inheritance:r /grant:r "$($env:USERNAME):R"
+   ```
+
+3. Lägg till i `C:\Users\<du>\.ssh\config`. `deploy.sh` skriver ut blocket med rätt IP-adresser:
+
+   ```
+   Host novatrix-bastion
+     HostName <BASTION-PUBLIK-IP>
+     User ec2-user
+     IdentityFile ~/.ssh/novatrix-v44-key.pem
+   Host novatrix-web
+     HostName <WEBBSERVERNS-PRIVATA-IP>
+     User ec2-user
+     IdentityFile ~/.ssh/novatrix-v44-key.pem
+     ProxyJump novatrix-bastion
+   ```
+
+4. Anslut:
+
+   ```powershell
+   ssh novatrix-web
+   ```
+
+`ProxyJump` gör att bastion bara vidarebefordrar TCP-trafiken till webbserverns privata IP. Nyckeln stannar på din dator och kopieras aldrig till bastion, och ingen agent forwarding används. Webbservern har ingen öppen SSH-port mot internet, så `ssh ec2-user@<WEBBSERVERNS-PUBLIKA-IP>` ska inte fungera.
 
 ### Verifiera
 
@@ -432,18 +459,19 @@ ssh -i novatrix-v44-key.pem \
 bash verify.sh
 ```
 
-Skriptet gör riktiga anslutningar och jämför med vad som förväntas:
+Skriptet gör riktiga anslutningar och jämför med vad som förväntas. Eftersom admin-IP:n är din dator och inte CloudShell öppnar skriptet tillfälligt SSH till bastion för CloudShells IP under del 3, i både security group och NACL, och tar bort reglerna direkt efteråt. Del 2 visar alltså först att CloudShell blockeras, och sista raden i del 3 att den blockeras igen.
 
 | Del | Test | Förväntat |
 |---|---|---|
 | 1. Internet → webb | HTTP 80, HTTPS 443 | TILLATET |
 | | SSH 22, databasport 3306, port 8080 | BLOCKERAT |
-| 2. Internet → bastion | SSH 22 från admin-IP | TILLATET |
+| 2. Internet → bastion | SSH 22 från CloudShell, som inte är admin-IP | BLOCKERAT |
 | | HTTP 80 | BLOCKERAT |
 | 3. Inifrån via bastion | SSH bastion → webbserverns privata IP | TILLATET |
 | | bastion → webb port 80, bastion → internet 443 | BLOCKERAT |
 | | webb → internet 443 (S3, dnf) | TILLATET |
 | | webb → internet 80, webb → internet 22, webb → bastion 22 | BLOCKERAT |
+| | SSH från CloudShell när den tillfälliga regeln är borttagen | BLOCKERAT |
 | 4. Ett lager i taget | a) SG öppnad för SSH, NACL stängd | BLOCKERAT (NACL stoppar) |
 | | b) båda öppnade (kontroll att testet fungerar) | TILLATET |
 | | c) NACL öppnad, SG stängd | BLOCKERAT (SG stoppar) |

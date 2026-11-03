@@ -16,7 +16,7 @@
   <!-- Externa aktörer -->
   <rect x="230" y="80" width="230" height="56" rx="8" fill="#eef2ff" stroke="#4f46e5" stroke-width="1.5"/>
   <text x="345" y="104" font-size="15" font-weight="600" text-anchor="middle" fill="#1e1b4b">Admin</text>
-  <text x="345" y="124" font-size="13" text-anchor="middle" fill="#374151">CloudShell / min IP</text>
+  <text x="345" y="124" font-size="13" text-anchor="middle" fill="#374151">min dator (admin-IP)</text>
 
   <circle cx="850" cy="108" r="34" fill="#eef2ff" stroke="#4f46e5" stroke-width="1.5"/>
   <text x="850" y="104" font-size="14" font-weight="600" text-anchor="middle" fill="#1e1b4b">Internet</text>
