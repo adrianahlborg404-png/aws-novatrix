@@ -4,12 +4,13 @@ Kursprojekt där företaget **Novatrix AB** flyttar sin webbplats till AWS. En m
 
 > Projekt inom utbildningen Moln- och virtualiseringsspecialist, Campus Mölndal.
 
-**Teknik:** AWS EC2 · AWS IAM · STS · S3 · AWS CLI · CloudShell · Security groups · SSM Parameter Store · user data (cloud-init) · Amazon Linux 2023 · Apache · AWS Budgets · Bash
+**Teknik:** AWS EC2 · AWS IAM · STS · S3 · VPC · subnät och route tables · internet gateway · NACL · Security groups · bastion host · VPC Flow Logs · CloudWatch Logs · CloudFormation · AWS CLI · CloudShell · SSM Parameter Store · user data (cloud-init) · Amazon Linux 2023 · Apache · AWS Budgets · Bash
 
 | Vecka | Tema | Mapp |
 |---|---|---|
 | v42 | Compute – EC2-webbserver som skapas helt från kod | [v42](./v42) |
 | v43 | IAM – användare, grupper, policies och roller enligt least privilege | [v43](./v43) |
+| v44 | Nätverk och säkerhet – eget VPC, publika/privata subnät, NACL:er, security groups och bastion (defense in depth) | [v44](./v44) |
 
 ---
 
@@ -299,6 +300,217 @@ v43/
     └── teardown.sh
 ```
 
+## v44 – Nätverk och säkerhet (VPC, defense in depth)
+
+Webbservern flyttar från default-VPC:n till ett eget **VPC** som är byggt för Novatrix. Nätverket är definierat som kod i en CloudFormation-mall och delas upp i publika och privata subnät. Trafiken filtreras i tre lager, och bara det som behövs släpps igenom: webben på HTTP/HTTPS, SSH bara via en bastion från en enda IP, och allt annat stängt. De privata subnäten är förberedda för databasen som kommer i v45.
+
+IAM och S3 från v43 återanvänds: webbservern har kvar rollen `novatrix-web-role` och hämtar webbsidan från den privata bucketen.
+
+![Nätverksskiss v44](v44/docs/natverk.png)
+
+Skissen finns även som [SVG](v44/docs/natverk.svg).
+
+### Adressplan
+
+| Subnät | CIDR | AZ | Typ | Innehåll |
+|---|---|---|---|---|
+| `novatrix-public-web` | `10.0.1.0/24` | a | Publikt | Webbservern `novatrix-web-v44` |
+| `novatrix-public-mgmt` | `10.0.2.0/24` | a | Publikt | Bastion `novatrix-bastion-v44` |
+| `novatrix-private-db-a` | `10.0.11.0/24` | a | Privat | Databasen (v45) |
+| `novatrix-private-db-b` | `10.0.12.0/24` | b | Privat | Andra AZ:n, RDS kräver subnät i två AZ |
+
+VPC: `novatrix-vpc`, `10.0.0.0/16`. Webben och administrationen ligger i *olika* subnät, så att varje subnät får en egen NACL med bara sina regler.
+
+### Routing
+
+| Route table | Kopplad till | Routes |
+|---|---|---|
+| `novatrix-public-rt` | webb, mgmt | `10.0.0.0/16 → local`, `0.0.0.0/0 → novatrix-igw` |
+| `novatrix-private-rt` | db-a, db-b | `10.0.0.0/16 → local` (ingen väg ut) |
+
+Det som gör ett subnät publikt är route table-raden mot internet gateway, inte namnet. De privata subnäten har en egen route table i stället för VPC:ns main route table, så att en route som någon lägger till där inte råkar ge databasen en väg ut. De delar inte heller ut publika IP-adresser.
+
+### Lager för lager och vilka hot de skyddar mot
+
+| Lager | Vad | Skyddar mot |
+|---|---|---|
+| 1. Subnät och routing | Publika och privata subnät, privata saknar route till internet | Att databasen exponeras mot internet, även om någon av misstag ger den en publik IP eller en öppen security group. Utan route finns ingen väg in eller ut. |
+| 2. NACL per subnät | Stateless filter på subnätsgränsen, kan *neka* | Felkonfigurerade security groups (t.ex. port 22 öppnad för `0.0.0.0/0`), skanning av portar som inte används, och nya instanser som startas med fel security group i subnätet. |
+| 3. Security group per instans | Stateful filter, bara tillåt, kan peka på andra security groups | Lateral rörelse inne i VPC:t: webbservern når bara databasen, bastion når bara webbservern på port 22, databasen når ingenting. Begränsar också vart en hackad webbserver kan ansluta ut: bara 443 och databasen, inte SSH eller andra portar. |
+| 4. Bastion | Enda vägen in för SSH, från en IP | Brute force och sårbarheter i SSH på webbservern, som aldrig exponerar port 22 mot internet. Bastion har ingen IAM-roll och ingen väg ut, så den är värdelös för en angripare som tar sig in. Nyckeln stannar i CloudShell (`ProxyCommand -W`), den kopieras aldrig till bastion. |
+| 5. IAM (från v43) | Webbserverns roll får bara läsa `webb/*` i S3, IMDSv2 krävs | Att en hackad webbserver kan nå andra AWS-resurser. |
+| 6. VPC Flow Logs | Loggar ACCEPT och REJECT för hela VPC:t | Att intrång och skanning går obemärkt förbi. Visar i efterhand vem som försökt nå vad. |
+
+### Security groups
+
+| Security group | In | Ut |
+|---|---|---|
+| `novatrix-web-sg-v44` | TCP 80, 443 från `0.0.0.0/0` · TCP 22 från `novatrix-bastion-sg` | TCP 443 till `0.0.0.0/0` (S3, dnf) · TCP 3306 till `novatrix-db-sg` |
+| `novatrix-bastion-sg` | TCP 22 från admin-IP `/32` | TCP 22 till `novatrix-web-sg-v44` |
+| `novatrix-db-sg` | TCP 3306 från `novatrix-web-sg-v44` | Inget |
+
+Standardregeln "all utgående trafik tillåten" är borttagen i alla tre. Reglerna mellan grupperna pekar på *security groups*, inte IP-adresser, så de gäller även om instanserna byts ut och får nya IP:n.
+
+### NACL:er
+
+| NACL | Riktning | Regel | Port | Källa/mål | Varför |
+|---|---|---|---|---|---|
+| `novatrix-web-nacl` | In | 100 | 80 | `0.0.0.0/0` | HTTP |
+| | In | 110 | 443 | `0.0.0.0/0` | HTTPS |
+| | In | 120 | 22 | `10.0.2.0/24` (mgmt) | SSH bara från bastionsubnätet |
+| | In | 130 | 32768–65535 | `0.0.0.0/0` | Svar på webbserverns egna anrop (S3, dnf, databas) |
+| | Ut | 100 | 1024–65535 | `0.0.0.0/0` | Svar till besökare och bastion |
+| | Ut | 110 | 443 | `0.0.0.0/0` | S3 och dnf-paket |
+| `novatrix-mgmt-nacl` | In | 100 | 22 | admin-IP `/32` | SSH till bastion |
+| | In | 110 | 32768–65535 | `10.0.1.0/24` | Svar från webbservern |
+| | Ut | 100 | 1024–65535 | admin-IP `/32` | Svar till admin |
+| | Ut | 110 | 22 | `10.0.1.0/24` | SSH vidare till webbservern |
+| `novatrix-db-nacl` | In | 100 | 3306 | `10.0.1.0/24` | Bara webbsubnätet |
+| | Ut | 100 | 32768–65535 | `10.0.1.0/24` | Svar till webbservern |
+| Alla | In/Ut | `*` | alla | alla | **DENY**, allt som inte matchar ovan |
+
+**Varför portintervallen?** En NACL är *stateless* och minns inte att en anslutning redan är godkänd, så svarstrafiken måste tillåtas som en egen regel. Svaret går till klientens tillfälliga (ephemeral) port. Besökare på internet kan använda vilken port som helst från 1024 och uppåt (Windows 49152–65535, NAT-routrar hela intervallet), därför `1024–65535` ut. Våra egna servrar kör Amazon Linux som använder `32768–60999`, därför räcker `32768–65535` för svar *till* dem. En security group är *stateful* och släpper automatiskt igenom svaret, så där behövs inga sådana regler.
+
+Det är också därför lagren kompletterar varandra: NACL:en kan inte skilja ett svar från en ny anslutning på en hög port, men security groupen kan. NACL:en kan däremot *neka*, vilket en security group inte kan.
+
+DNS-frågor till VPC:ns resolver (`10.0.0.2`), instansmetadata (`169.254.169.254`) och Amazon Time Sync filtreras inte av NACL:er eller security groups, därför behövs inga regler för dem.
+
+### Placering av lösningen
+
+| Komponent | Subnät | Publik IP | Varför |
+|---|---|---|---|
+| Webbserver | `novatrix-public-web` | Ja | Ska nås från internet på 80/443. SSH bara från bastion. |
+| Bastion | `novatrix-public-mgmt` | Ja | Enda punkten som tar emot SSH utifrån, och då bara från admin-IP. |
+| Databas (v45) | `novatrix-private-db-a/b` | Nej | Ska bara nås av webbservern. DB subnet group `novatrix-db-subnets` och `novatrix-db-sg` är redan skapade, så RDS-instansen i v45 behöver bara peka på dem. |
+
+Databasporten är en parameter i mallen (`DbPort`, standard `3306` för MySQL/MariaDB). Blir det PostgreSQL ändras den till `5432` och stacken uppdateras.
+
+### Nätverket som kod
+
+Allt i nätverket finns i en fil, [`v44/cloudformation/natverk.yaml`](v44/cloudformation/natverk.yaml): VPC, internet gateway, fyra subnät, två route tables, tre NACL:er med regler, tre security groups, DB subnet group och flow logs med en egen IAM-roll som bara får skriva till sin loggrupp. `deploy.sh` skapar stacken med `aws cloudformation deploy`, och samma kommando uppdaterar den om mallen eller admin-IP:n ändras.
+
+Varför CloudFormation och inte bara AWS CLI som i v42–v43:
+
+- **Deklarativt.** Mallen beskriver hur nätverket *ska* se ut, inte stegen dit. Körs den igen ändras bara det som skiljer.
+- **Beroenden löses automatiskt.** En route mot internet gateway kan inte skapas innan gatewayen är kopplad till VPC:t. CloudFormation räknar ut ordningen.
+- **Allt rivs med ett kommando** och i rätt ordning (`delete-stack`).
+- **Drift syns.** Ändras något för hand i konsolen visar CloudFormation drift detection skillnaden mot mallen.
+
+Instanserna startas fortfarande med AWS CLI i `deploy.sh`, eftersom de byts ut oftare än nätverket och återanvänder user data-mönstret från v43.
+
+Säkerhetsgrupper som pekar på varandra (bastion → webb → databas) skapar cirkelberoenden i CloudFormation. Det löses genom att några regler är egna resurser (`AWS::EC2::SecurityGroupIngress`) i stället för att ligga inne i gruppen.
+
+### Skapa miljön
+
+I **CloudShell**:
+
+```bash
+git clone https://github.com/adrianahlborg404-png/aws-novatrix.git
+cd aws-novatrix/v43/scripts
+bash iam-setup.sh            # S3-bucket och novatrix-web-role från v43 (tål att köras igen)
+cd ../../v44/scripts
+bash deploy.sh               # nätverksstacken + webbserver + bastion
+```
+
+Utan argument blir CloudShells egen IP admin-IP, så att `verify.sh` kan testa SSH-vägen via bastion. Vill du SSH:a från din egen dator, kör `bash deploy.sh <DIN-PUBLIKA-IP>`. Stacken uppdateras och den gamla IP:n förlorar åtkomst.
+
+Kör `bash teardown.sh` i `v43/scripts` först om v43-instansen fortfarande finns.
+
+### SSH till webbservern via bastion
+
+```bash
+ssh -i novatrix-v44-key.pem \
+  -o ProxyCommand="ssh -i novatrix-v44-key.pem -W %h:%p ec2-user@<BASTION-IP>" \
+  ec2-user@<WEBBSERVERNS-PRIVATA-IP>
+```
+
+`deploy.sh` skriver ut kommandot med rätt IP:n. `-W` gör att bastion bara vidarebefordrar TCP-trafiken. Nyckeln och SSH-sessionen till webbservern stannar i CloudShell, och ingen agent forwarding används.
+
+### Verifiera
+
+```bash
+bash verify.sh
+```
+
+Skriptet gör riktiga anslutningar och jämför med vad som förväntas:
+
+| Del | Test | Förväntat |
+|---|---|---|
+| 1. Internet → webb | HTTP 80, HTTPS 443 | TILLATET |
+| | SSH 22, databasport 3306, port 8080 | BLOCKERAT |
+| 2. Internet → bastion | SSH 22 från admin-IP | TILLATET |
+| | HTTP 80 | BLOCKERAT |
+| 3. Inifrån via bastion | SSH bastion → webbserverns privata IP | TILLATET |
+| | bastion → webb port 80, bastion → internet 443 | BLOCKERAT |
+| | webb → internet 443 (S3, dnf) | TILLATET |
+| | webb → internet 80, webb → internet 22, webb → bastion 22 | BLOCKERAT |
+| 4. Ett lager i taget | a) SG öppnad för SSH, NACL stängd | BLOCKERAT (NACL stoppar) |
+| | b) båda öppnade (kontroll att testet fungerar) | TILLATET |
+| | c) NACL öppnad, SG stängd | BLOCKERAT (SG stoppar) |
+| 5. Privata subnät | privat route table har väg till internet | NEJ |
+| | privata subnät delar ut publik IP | NEJ |
+| | `db-sg` släpper bara in `web-sg` | JA |
+
+Del 4 visar defense in depth i praktiken. Skriptet öppnar tillfälligt SSH för CloudShells IP i *ett* lager i taget, som en felkonfiguration, och visar att det andra lagret fortfarande stoppar trafiken. Reglerna tas bort direkt efteråt, även om skriptet avbryts.
+
+**Blockerat syns som timeout.** NACL:er och security groups svarar inte, de släpper paketet tyst. Därför tolkar skriptet timeout som BLOCKERAT. Om anslutningen i stället nekas direkt (TCP RST) har trafiken nått servern men ingen tjänst lyssnar, det rapporteras som STANGD.
+
+### Se trafiken i flow logs
+
+```bash
+bash visa-trafik.sh          # senaste 30 minuterna
+bash visa-trafik.sh 60 | tee trafik.txt
+```
+
+Skriptet läser VPC Flow Logs från CloudWatch och sammanfattar per server vad som släppts igenom (`ACCEPT`) och blockerats (`REJECT`), både inkommande och utgående, med antal flöden och unika källor. Varje flödespost tolkas från det nätverkskort den loggades på. Loggarna levereras med några minuters fördröjning.
+
+Här syns även trafik som inte kommer från testerna: en publik IP får skanningar från internet inom några minuter, mot portar som SSH (22), RDP (3389) och telnet (23). De ska alla ligga som `REJECT`.
+
+### Ta bort miljön
+
+```bash
+bash teardown.sh               # allt: instanser, key pair, nätverksstacken, IAM och S3 från v43
+bash teardown.sh --behall-iam  # behåll IAM och S3 till nästa pass
+```
+
+### Kostnad
+
+- Två `t3.micro` (webb och bastion) när miljön är uppe. Free tier täcker 750 timmar per månad, och miljön rivs efter varje pass.
+- Publika IPv4-adresser kostar 0,005 USD per timme och adress, och bastion är den enda extra.
+- Ingen NAT gateway. De privata subnäten behöver ingen väg ut, och en NAT gateway kostar omkring 1 USD per dygn även när den inte används.
+- Flow logs: små mängder data till CloudWatch, loggruppen sparas i 3 dagar.
+
+### Så fungerar skripten
+
+| Fil | Körs var | Gör |
+|---|---|---|
+| [`v44/cloudformation/natverk.yaml`](v44/cloudformation/natverk.yaml) | CloudFormation | Hela nätverket som kod |
+| [`v44/scripts/deploy.sh`](v44/scripts/deploy.sh) | CloudShell | Kontrollerar v43:s IAM, skapar/uppdaterar stacken, startar webbserver och bastion. Tål att köras igen |
+| [`v44/scripts/user-data.sh`](v44/scripts/user-data.sh) | Webbservern, vid första start | Apache med HTTPS (självsignerat cert), webbsidan från S3, synk-timer, `natverk.txt` med subnät och IP |
+| [`v44/scripts/verify.sh`](v44/scripts/verify.sh) | CloudShell | Testar tillåten och blockerad trafik i alla lager |
+| [`v44/scripts/visa-trafik.sh`](v44/scripts/visa-trafik.sh) | CloudShell | Sammanfattar VPC Flow Logs (ACCEPT/REJECT) |
+| [`v44/scripts/teardown.sh`](v44/scripts/teardown.sh) | CloudShell | Tar bort allt i rätt ordning |
+| [`v44/docs/natverk.svg`](v44/docs/natverk.svg) | – | Nätverksskissen (även som PNG) |
+
+HTTPS använder ett självsignerat certifikat, så webbläsaren varnar. Ett riktigt certifikat kräver ett domännamn, till exempel med ACM och en load balancer längre fram.
+
+### Filstruktur
+
+```
+v44/
+├── cloudformation/
+│   └── natverk.yaml      # VPC, subnät, routing, NACL, SG, flow logs
+├── docs/
+│   ├── natverk.svg       # nätverksskiss
+│   └── natverk.png
+└── scripts/
+    ├── deploy.sh
+    ├── user-data.sh
+    ├── verify.sh
+    ├── visa-trafik.sh
+    └── teardown.sh
+```
+
 ---
 
 ## Vad jag lärde mig
@@ -322,3 +534,15 @@ v43/
 **v43: Att verifiera nekat är lika viktigt som tillåtet.** Ett test som bara visar att något fungerar säger inget om least privilege. Därför testar `verify.sh` varje roll både mot det den ska få och det den inte ska få.
 
 **v43: Att IAM är eventually consistent.** En ny access key godkändes av STS direkt men avvisades av EC2 några sekunder till. Ett nekat anrop behöver därför inte betyda fel policy. Felkoden skiljer `AuthFailure` (okänd identitet) från `UnauthorizedOperation` (nekad av policy).
+
+**v44: Att publikt och privat bestäms av routing.** Ett subnät blir publikt av en route mot internet gateway, inte av namnet. Utan den routen kan en databas inte nås utifrån ens om den skulle få en öppen security group.
+
+**v44: Skillnaden mellan stateless och stateful.** En NACL minns inga anslutningar, så svarstrafiken måste tillåtas på ephemeral-portar. En security group släpper igenom svaret automatiskt. Därför kompletterar de varandra: NACL:en kan neka, security groupen kan skilja svar från nya anslutningar.
+
+**v44: Att security groups kan peka på varandra.** `db-sg` släpper in från `web-sg`, inte från en IP. Regeln följer med när instanser byts ut, och kedjan admin → bastion → webb → databas blir tydlig i koden.
+
+**v44: Att begränsa utgående trafik också.** Standardregeln i en security group tillåter all trafik ut. Tas den bort kan en hackad server inte ringa hem på godtyckliga portar, och bastion når inget annat än webbserverns port 22.
+
+**v44: Att testa ett lager i taget.** Det räcker inte att visa att SSH är blockerat, eftersom det inte visar *vilket* lager som stoppar. Genom att öppna ett lager i taget syns att vart och ett håller på egen hand, och kontrolltestet med båda öppna visar att testet i sig fungerar.
+
+**v44: Att infrastruktur som kod gör nätverket granskningsbart.** Alla regler finns i en fil som kan läsas, versionshanteras och rivas med ett kommando, i stället för klick i konsolen som ingen kan se i efterhand.

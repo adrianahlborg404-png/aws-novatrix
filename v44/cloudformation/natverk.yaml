@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Novatrix AB v44 - VPC med publika och privata subnat, routing, NACL:er,
+  security groups och VPC Flow Logs (defense in depth). Skapas av deploy.sh.
+
+# =============================================================
+# Natverket som kod. Tre lager av skydd:
+#   1. Subnat och routing  - vad som ALLS kan na internet
+#   2. NACL per subnat     - grovt filter, stateless, kan neka
+#   3. Security groups     - fint filter per instans, stateful
+# Plus VPC Flow Logs som visar vad som slapps igenom och blockeras.
+# =============================================================
+
+Parameters:
+  AdminIp:
+    Type: String
+    Description: Publik IPv4 som far SSH:a till bastion (utan /32). deploy.sh fyller i den.
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}$'
+  DbPort:
+    Type: Number
+    Default: 3306
+    Description: Port for databasen i v45 (3306 MySQL/MariaDB, 5432 PostgreSQL)
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  WebCidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: Publikt subnat for webbservern
+  MgmtCidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: Publikt subnat for bastion (administration)
+  DbCidrA:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: Privat subnat for databasen, AZ a
+  DbCidrB:
+    Type: String
+    Default: 10.0.12.0/24
+    Description: Privat subnat for databasen, AZ b (RDS kraver tva AZ)
+
+Resources:
+  # ---------------------------------------------------------
+  # VPC och internet gateway
+  # ---------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: novatrix-vpc }]
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: novatrix-igw }]
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  # ---------------------------------------------------------
+  # Subnat: tva publika (webb, mgmt) och tva privata (db a/b)
+  # ---------------------------------------------------------
+  WebSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref WebCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: novatrix-public-web }, { Key: Niva, Value: publik }]
+
+  MgmtSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref MgmtCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: novatrix-public-mgmt }, { Key: Niva, Value: publik }]
+
+  DbSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref DbCidrA
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: novatrix-private-db-a }, { Key: Niva, Value: privat }]
+
+  DbSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref DbCidrB
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: novatrix-private-db-b }, { Key: Niva, Value: privat }]
+
+  # ---------------------------------------------------------
+  # Routing: publika subnat har vag till internet, privata inte
+  # ---------------------------------------------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: novatrix-public-rt }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  WebSubnetRt:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref WebSubnet, RouteTableId: !Ref PublicRouteTable }
+
+  MgmtSubnetRt:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref MgmtSubnet, RouteTableId: !Ref PublicRouteTable }
+
+  # Egen route table utan internetvag. Explicit koppling i stallet for VPC:ns
+  # main route table, sa att en route som laggs till dar inte paverkar databasen.
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: novatrix-private-rt }]
+
+  DbSubnetARt:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DbSubnetA, RouteTableId: !Ref PrivateRouteTable }
+
+  DbSubnetBRt:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref DbSubnetB, RouteTableId: !Ref PrivateRouteTable }
+
+  # ---------------------------------------------------------
+  # NACL:er (stateless). Svarstrafik maste tillatas separat:
+  #   - svar TILL klienter pa internet: 1024-65535 (klientens port)
+  #   - svar till VARA Linux-servrar:   32768-65535 (Linux ephemeral)
+  # Allt som inte matchar en regel nekas av den inbyggda regeln *.
+  # ---------------------------------------------------------
+  WebNacl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: novatrix-web-nacl }]
+
+  WebNaclInHttp:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref WebNacl, RuleNumber: 100, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: 0.0.0.0/0, PortRange: { From: 80, To: 80 } }
+  WebNaclInHttps:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref WebNacl, RuleNumber: 110, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: 0.0.0.0/0, PortRange: { From: 443, To: 443 } }
+  WebNaclInSshFranMgmt:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref WebNacl, RuleNumber: 120, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Ref MgmtCidr, PortRange: { From: 22, To: 22 } }
+  WebNaclInSvar:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref WebNacl, RuleNumber: 130, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: 0.0.0.0/0, PortRange: { From: 32768, To: 65535 } }
+  WebNaclOutSvar:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref WebNacl, RuleNumber: 100, Egress: true, Protocol: 6, RuleAction: allow,
+                  CidrBlock: 0.0.0.0/0, PortRange: { From: 1024, To: 65535 } }
+  WebNaclOutHttps:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref WebNacl, RuleNumber: 110, Egress: true, Protocol: 6, RuleAction: allow,
+                  CidrBlock: 0.0.0.0/0, PortRange: { From: 443, To: 443 } }
+  # Webb -> databas (DbPort) ryms redan i regel 100 ovan. En NACL kan inte skilja
+  # svar fran nya anslutningar, darfor ar det security groupen som stoppar att
+  # webbservern sjalv oppnar anslutningar ut pa hoga portar.
+
+  WebNaclAssoc:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref WebSubnet, NetworkAclId: !Ref WebNacl }
+
+  MgmtNacl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: novatrix-mgmt-nacl }]
+
+  MgmtNaclInSshAdmin:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref MgmtNacl, RuleNumber: 100, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Sub "${AdminIp}/32", PortRange: { From: 22, To: 22 } }
+  MgmtNaclInSvarFranWebb:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref MgmtNacl, RuleNumber: 110, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Ref WebCidr, PortRange: { From: 32768, To: 65535 } }
+  MgmtNaclOutSvarAdmin:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref MgmtNacl, RuleNumber: 100, Egress: true, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Sub "${AdminIp}/32", PortRange: { From: 1024, To: 65535 } }
+  MgmtNaclOutSshTillWebb:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref MgmtNacl, RuleNumber: 110, Egress: true, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Ref WebCidr, PortRange: { From: 22, To: 22 } }
+
+  MgmtNaclAssoc:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref MgmtSubnet, NetworkAclId: !Ref MgmtNacl }
+
+  DbNacl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: novatrix-db-nacl }]
+
+  DbNaclInFranWebb:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref DbNacl, RuleNumber: 100, Egress: false, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Ref WebCidr, PortRange: { From: !Ref DbPort, To: !Ref DbPort } }
+  DbNaclOutSvarTillWebb:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties: { NetworkAclId: !Ref DbNacl, RuleNumber: 100, Egress: true, Protocol: 6, RuleAction: allow,
+                  CidrBlock: !Ref WebCidr, PortRange: { From: 32768, To: 65535 } }
+
+  DbNaclAssocA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref DbSubnetA, NetworkAclId: !Ref DbNacl }
+  DbNaclAssocB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties: { SubnetId: !Ref DbSubnetB, NetworkAclId: !Ref DbNacl }
+
+  # ---------------------------------------------------------
+  # Security groups (stateful). Varje grupp pekar pa nasta i kedjan:
+  #   admin-IP -> bastion-sg -> web-sg -> db-sg
+  # Standardregeln "all utgaende trafik" ersatts overallt.
+  # ---------------------------------------------------------
+  BastionSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: novatrix-bastion-sg
+      GroupDescription: "Bastion: SSH in bara fran admin-IP, SSH ut bara till webbservern"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Sub "${AdminIp}/32", Description: SSH fran admin-IP }
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, DestinationSecurityGroupId: !Ref WebSg, Description: SSH till webbservern }
+      Tags: [{ Key: Name, Value: novatrix-bastion-sg }]
+
+  WebSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: novatrix-web-sg-v44
+      GroupDescription: "Webb: HTTP/HTTPS fran alla, SSH bara fran bastion"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0, Description: HTTP }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTPS ut: S3 och dnf-paket" }
+        - { IpProtocol: tcp, FromPort: !Ref DbPort, ToPort: !Ref DbPort, DestinationSecurityGroupId: !Ref DbSg, Description: Till databasen }
+      Tags: [{ Key: Name, Value: novatrix-web-sg-v44 }]
+
+  # Separat regel for att undvika cirkelberoende mellan BastionSg och WebSg
+  WebSgSshFranBastion:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref WebSg
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref BastionSg
+      Description: SSH bara fran bastion
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: novatrix-db-sg
+      GroupDescription: "Databas (v45): bara fran webbservern, ingen utgaende trafik"
+      VpcId: !Ref Vpc
+      # En regel mot 127.0.0.1/32 tar bort standardregeln och slapper inget ut
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Ingen utgaende trafik }
+      Tags: [{ Key: Name, Value: novatrix-db-sg }]
+
+  DbSgFranWebb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DbSg
+      IpProtocol: tcp
+      FromPort: !Ref DbPort
+      ToPort: !Ref DbPort
+      SourceSecurityGroupId: !Ref WebSg
+      Description: Bara fran webbservern
+
+  # Databasen i v45 behover bara peka pa den har subnat-gruppen
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: novatrix-db-subnets
+      DBSubnetGroupDescription: Privata subnat for Novatrix databas (v45)
+      SubnetIds: [!Ref DbSubnetA, !Ref DbSubnetB]
+
+  # ---------------------------------------------------------
+  # VPC Flow Logs -> CloudWatch Logs (ACCEPT och REJECT)
+  # ---------------------------------------------------------
+  FlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /novatrix/v44/flowlogs
+      RetentionInDays: 3
+
+  # Least privilege aven har: rollen far bara skriva till just den har loggruppen
+  FlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: vpc-flow-logs.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: skriv-flowlogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !GetAtt FlowLogGroup.Arn
+              - Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: "*"
+      Tags: [{ Key: Name, Value: novatrix-flowlog-role }]
+
+  FlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref Vpc
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref FlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      MaxAggregationInterval: 60
+      Tags: [{ Key: Name, Value: novatrix-flowlog }]
+
+Outputs:
+  VpcId:          { Value: !Ref Vpc }
+  WebSubnetId:    { Value: !Ref WebSubnet }
+  MgmtSubnetId:   { Value: !Ref MgmtSubnet }
+  DbSubnetIds:    { Value: !Join [",", [!Ref DbSubnetA, !Ref DbSubnetB]] }
+  PrivateRouteTableId: { Value: !Ref PrivateRouteTable }
+  WebNaclId:      { Value: !Ref WebNacl }
+  WebSgId:        { Value: !Ref WebSg }
+  BastionSgId:    { Value: !Ref BastionSg }
+  DbSgId:         { Value: !Ref DbSg }
+  DbSubnetGroup:  { Value: !Ref DbSubnetGroup }
+  DbPort:         { Value: !Ref DbPort }
+  AdminIp:        { Value: !Ref AdminIp }
+  FlowLogGroup:   { Value: !Ref FlowLogGroup }

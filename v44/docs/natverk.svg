@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1010" width="1400" height="1010" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="pil" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f2937"/>
+    </marker>
+    <marker id="pilgra" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="1010" fill="#ffffff"/>
+
+  <!-- Titel -->
+  <text x="40" y="34" font-size="22" font-weight="700" fill="#111827">Novatrix AB v44 – nätverksdesign</text>
+  <text x="40" y="58" font-size="14" fill="#4b5563">VPC i eu-north-1 · defense in depth: subnät/routing → NACL → security group</text>
+
+  <!-- Externa aktörer -->
+  <rect x="230" y="80" width="230" height="56" rx="8" fill="#eef2ff" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="345" y="104" font-size="15" font-weight="600" text-anchor="middle" fill="#1e1b4b">Admin</text>
+  <text x="345" y="124" font-size="13" text-anchor="middle" fill="#374151">CloudShell / min IP</text>
+
+  <circle cx="850" cy="108" r="34" fill="#eef2ff" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="850" y="104" font-size="14" font-weight="600" text-anchor="middle" fill="#1e1b4b">Internet</text>
+  <text x="850" y="121" font-size="12" text-anchor="middle" fill="#374151">besökare</text>
+
+  <!-- VPC -->
+  <rect x="40" y="170" width="1100" height="790" rx="12" fill="#f0f9ff" stroke="#0369a1" stroke-width="2.5"/>
+  <text x="60" y="198" font-size="16" font-weight="700" fill="#075985">VPC novatrix-vpc · 10.0.0.0/16</text>
+  <text x="60" y="218" font-size="12.5" fill="#0c4a6e">VPC Flow Logs → CloudWatch /novatrix/v44/flowlogs (ACCEPT + REJECT)</text>
+
+  <!-- IGW -->
+  <rect x="580" y="190" width="200" height="54" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.5"/>
+  <text x="680" y="213" font-size="14" font-weight="600" text-anchor="middle" fill="#0c4a6e">Internet gateway</text>
+  <text x="680" y="232" font-size="12" text-anchor="middle" fill="#0c4a6e">novatrix-igw</text>
+
+  <!-- Publik zon -->
+  <rect x="70" y="270" width="1040" height="320" rx="10" fill="#f0fdf4" stroke="#15803d" stroke-width="1.5"/>
+  <text x="90" y="294" font-size="14" font-weight="700" fill="#14532d">Publika subnät</text>
+  <text x="90" y="313" font-size="12.5" fill="#166534">route table novatrix-public-rt: 10.0.0.0/16 → local · 0.0.0.0/0 → IGW</text>
+
+  <!-- mgmt-subnät -->
+  <rect x="100" y="328" width="470" height="245" rx="8" fill="#ffffff" stroke="#15803d" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="115" y="350" font-size="13.5" font-weight="700" fill="#14532d">novatrix-public-mgmt · 10.0.2.0/24 · AZ a</text>
+  <rect x="170" y="365" width="330" height="110" rx="8" fill="#fef9c3" stroke="#a16207" stroke-width="1.5"/>
+  <text x="335" y="390" font-size="14.5" font-weight="700" text-anchor="middle" fill="#422006">novatrix-bastion-v44</text>
+  <text x="335" y="410" font-size="12.5" text-anchor="middle" fill="#422006">t3.micro · bara SSH-hopp · ingen IAM-roll</text>
+  <text x="335" y="432" font-size="12.5" text-anchor="middle" fill="#422006">SG novatrix-bastion-sg</text>
+  <text x="335" y="450" font-size="12" text-anchor="middle" fill="#713f12">in: 22 från admin-IP · ut: 22 till web-sg</text>
+  <text x="335" y="466" font-size="12" text-anchor="middle" fill="#713f12">ingen annan väg ut, inte ens internet</text>
+  <text x="115" y="508" font-size="12" font-weight="700" fill="#166534">NACL novatrix-mgmt-nacl</text>
+  <text x="115" y="526" font-size="12" fill="#374151">in: 22 från admin-IP/32 · 32768–65535 från webbsubnätet</text>
+  <text x="115" y="543" font-size="12" fill="#374151">ut: 1024–65535 till admin-IP/32 · 22 till webbsubnätet</text>
+  <text x="115" y="560" font-size="12" fill="#b91c1c">allt annat: DENY (*)</text>
+
+  <!-- webbsubnät -->
+  <rect x="610" y="328" width="470" height="245" rx="8" fill="#ffffff" stroke="#15803d" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="625" y="350" font-size="13.5" font-weight="700" fill="#14532d">novatrix-public-web · 10.0.1.0/24 · AZ a</text>
+  <rect x="680" y="365" width="330" height="110" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
+  <text x="845" y="390" font-size="14.5" font-weight="700" text-anchor="middle" fill="#052e16">novatrix-web-v44</text>
+  <text x="845" y="410" font-size="12.5" text-anchor="middle" fill="#052e16">Apache HTTP/HTTPS · roll novatrix-web-role</text>
+  <text x="845" y="432" font-size="12.5" text-anchor="middle" fill="#052e16">SG novatrix-web-sg-v44</text>
+  <text x="845" y="450" font-size="12" text-anchor="middle" fill="#14532d">in: 80, 443 från alla · 22 bara från bastion-sg</text>
+  <text x="845" y="466" font-size="12" text-anchor="middle" fill="#14532d">ut: 443 (S3, dnf) · 3306 bara till db-sg</text>
+  <text x="625" y="508" font-size="12" font-weight="700" fill="#166534">NACL novatrix-web-nacl</text>
+  <text x="625" y="526" font-size="12" fill="#374151">in: 80, 443 alla · 22 från mgmt · 32768–65535 (svar)</text>
+  <text x="625" y="543" font-size="12" fill="#374151">ut: 443 alla · 1024–65535 (svar till klienter)</text>
+  <text x="625" y="560" font-size="12" fill="#b91c1c">allt annat: DENY (*)</text>
+
+  <!-- Privat zon -->
+  <rect x="70" y="620" width="1040" height="320" rx="10" fill="#fff7ed" stroke="#c2410c" stroke-width="1.5"/>
+  <text x="90" y="644" font-size="14" font-weight="700" fill="#7c2d12">Privata subnät · förberedda för databasen i v45</text>
+  <text x="90" y="663" font-size="12.5" fill="#9a3412">route table novatrix-private-rt: bara 10.0.0.0/16 → local, ingen väg till internet · ingen publik IP · DB subnet group novatrix-db-subnets</text>
+
+  <rect x="100" y="678" width="470" height="245" rx="8" fill="#ffffff" stroke="#c2410c" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="115" y="700" font-size="13.5" font-weight="700" fill="#7c2d12">novatrix-private-db-b · 10.0.12.0/24 · AZ b</text>
+  <rect x="200" y="725" width="270" height="70" rx="8" fill="#f3f4f6" stroke="#9ca3af" stroke-dasharray="4 3"/>
+  <text x="335" y="755" font-size="13" text-anchor="middle" fill="#374151">Andra AZ:n</text>
+  <text x="335" y="774" font-size="12" text-anchor="middle" fill="#4b5563">RDS kräver subnät i två AZ</text>
+  <text x="115" y="858" font-size="12" font-weight="700" fill="#9a3412">NACL novatrix-db-nacl</text>
+  <text x="115" y="876" font-size="12" fill="#374151">in: 3306 bara från webbsubnätet</text>
+  <text x="115" y="893" font-size="12" fill="#374151">ut: 32768–65535 bara till webbsubnätet</text>
+  <text x="115" y="910" font-size="12" fill="#b91c1c">allt annat: DENY (*)</text>
+
+  <rect x="610" y="678" width="470" height="245" rx="8" fill="#ffffff" stroke="#c2410c" stroke-dasharray="6 4" stroke-width="1.5"/>
+  <text x="625" y="700" font-size="13.5" font-weight="700" fill="#7c2d12">novatrix-private-db-a · 10.0.11.0/24 · AZ a</text>
+  <!-- databascylinder -->
+  <path d="M790,735 v60 a110,16 0 0 0 220,0 v-60" fill="#ffedd5" stroke="#c2410c" stroke-width="1.5"/>
+  <ellipse cx="900" cy="735" rx="110" ry="16" fill="#fed7aa" stroke="#c2410c" stroke-width="1.5"/>
+  <text x="900" y="780" font-size="14" font-weight="700" text-anchor="middle" fill="#431407">Databas (v45)</text>
+  <text x="900" y="834" font-size="12" text-anchor="middle" fill="#431407">SG novatrix-db-sg: in 3306 bara från web-sg</text>
+  <text x="900" y="850" font-size="12" text-anchor="middle" fill="#431407">ingen utgående trafik</text>
+  <text x="625" y="893" font-size="12" font-weight="700" fill="#9a3412">NACL novatrix-db-nacl</text>
+  <text x="625" y="910" font-size="12" fill="#374151">samma regler som db-b</text>
+
+  <!-- S3 utanför VPC -->
+  <path d="M1185,405 v70 a85,14 0 0 0 170,0 v-70" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
+  <ellipse cx="1270" cy="405" rx="85" ry="14" fill="#fde68a" stroke="#b45309" stroke-width="1.5"/>
+  <text x="1270" y="440" font-size="14" font-weight="700" text-anchor="middle" fill="#451a03">S3</text>
+  <text x="1270" y="458" font-size="12" text-anchor="middle" fill="#451a03">novatrix-webb-…</text>
+  <text x="1270" y="474" font-size="12" text-anchor="middle" fill="#451a03">privat, från v43</text>
+
+  <!-- Pilar -->
+  <path d="M345,136 C345,170 540,175 580,208" fill="none" stroke="#1f2937" stroke-width="2" marker-end="url(#pil)"/>
+  <rect x="160" y="142" width="160" height="22" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="240" y="158" font-size="12.5" font-weight="600" text-anchor="middle" fill="#111827">22 · bara admin-IP</text>
+
+  <path d="M850,142 C850,175 810,185 780,208" fill="none" stroke="#1f2937" stroke-width="2" marker-end="url(#pil)"/>
+  <rect x="892" y="142" width="70" height="22" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="927" y="158" font-size="12.5" font-weight="600" text-anchor="middle" fill="#111827">80, 443</text>
+
+  <path d="M625,244 C610,320 470,315 450,363" fill="none" stroke="#1f2937" stroke-width="2" marker-end="url(#pil)"/>
+  <path d="M735,244 C760,300 840,310 845,363" fill="none" stroke="#1f2937" stroke-width="2" marker-end="url(#pil)"/>
+
+  <path d="M500,420 L678,420" fill="none" stroke="#a16207" stroke-width="2.5" marker-end="url(#pil)"/>
+  <rect x="520" y="397" width="138" height="20" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="589" y="412" font-size="12" font-weight="600" text-anchor="middle" fill="#713f12">22 · privat IP</text>
+
+  <path d="M960,475 L960,719" fill="none" stroke="#c2410c" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#pil)"/>
+  <rect x="970" y="600" width="96" height="20" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="1018" y="615" font-size="12" font-weight="600" text-anchor="middle" fill="#7c2d12">3306 · v45</text>
+
+  <path d="M1010,440 L1183,440" fill="none" stroke="#1f2937" stroke-width="2" marker-end="url(#pil)"/>
+  <rect x="1060" y="417" width="104" height="20" rx="4" fill="#ffffff" stroke="#d1d5db"/>
+  <text x="1112" y="432" font-size="12" font-weight="600" text-anchor="middle" fill="#111827">443 via IGW</text>
+
+  <!-- Teckenförklaring -->
+  <text x="40" y="988" font-size="12.5" fill="#374151"><tspan font-weight="700">Lager 1</tspan> subnät + route table: vem kan alls nå internet  ·  <tspan font-weight="700">Lager 2</tspan> NACL per subnät: stateless, kan neka  ·  <tspan font-weight="700">Lager 3</tspan> security group per instans: stateful, bara tillåt</text>
+</svg>
