@@ -31,7 +31,7 @@ BUCKET="novatrix-webb-${KONTO}"
 
 echo "==> 1/7 Kontrollerar IAM och S3 fran v43"
 aws iam get-instance-profile --instance-profile-name "$PROFIL" >/dev/null 2>&1 && \
-aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null || {
+aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1 || {
   echo "    Rollen $PROFIL eller bucketen saknas. Kor forst:"
   echo "    cd ../../v43/scripts && bash iam-setup.sh && cd ../../v44/scripts"
   exit 1; }
