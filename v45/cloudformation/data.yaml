@@ -1,0 +1,271 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Novatrix AB v45 - datalagret for WordPress: RDS MariaDB i privata subnat,
+  EFS for WordPress-filerna och en S3-bucket for databasbackup med
+  livscykelregel. Lagger sig ovanpa natverket fran v44. Skapas av deploy.sh.
+
+# =============================================================
+# Varfor en egen stack? Natverket (v44) andras sallan, databasen och
+# lagringen har ett eget liv. Med separata stackar kan datalagret
+# skapas och rivas utan att natverket rors.
+#
+# Allt som behovs fran v44 skickas in som parametrar av deploy.sh,
+# som laser dem fran stacken novatrix-natverk-v44.
+#
+# Sakerhet i lager runt datat:
+#   1. Privata subnat utan route till internet (v44)
+#   2. NACL pa de privata subnaten: bara webbsubnatet, bara 3306/2049
+#   3. Security groups: databasen och EFS slapper bara in webb-sg
+#   4. Ingen publik adress: PubliclyAccessible false
+#   5. Kryptering i vila: RDS, EFS och S3
+#   6. Losenordet i Secrets Manager, rollen far bara lasa just det
+# =============================================================
+
+Parameters:
+  # ---------- fran natverksstacken i v44 ----------
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  DbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: De tva privata subnaten (AZ a och b) for EFS mount targets
+  DbSubnetGroup:
+    Type: String
+    Description: RDS subnet group fran v44 (novatrix-db-subnets)
+  WebSgId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Webbserverns security group fran v44
+  DbSgId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Databasens security group fran v44 (slapper bara in webb-sg)
+  DbNaclId:
+    Type: String
+    Description: NACL for de privata subnaten fran v44 (novatrix-db-nacl)
+  WebCidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: Webbsubnatet, enda kallan som far na EFS i NACL:en
+  DbPort:
+    Type: Number
+    Default: 3306
+
+  # ---------- fran IAM i v43 ----------
+  WebRoleName:
+    Type: String
+    Default: novatrix-web-role
+    Description: Webbserverns roll fran v43, far ratt att lasa DB-hemligheten och skriva backup
+
+  # ---------- val som varierar ----------
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t4g.micro, db.t3.small]
+    Description: Minsta klassen racker for en WordPress-sajt med lite trafik
+  DbStorageGb:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+  RdsBackupDays:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 35
+    Description: Automatisk RDS-backup. Free plan tillater max 1 dag, i drift hade jag valt 7.
+  S3BackupDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    Description: Backuper i S3 aldre an sa har manga dagar tas bort av livscykelregeln
+
+Resources:
+  # ---------------------------------------------------------
+  # 1. Losenordet. Secrets Manager genererar det, sa det finns
+  #    aldrig i repot, i skripten eller i parametrarna.
+  # ---------------------------------------------------------
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Admin-anvandare och losenord for novatrix-db-v45
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludePunctuation: true   # inga tecken som kan krangla i wp-config.php
+      Tags: [{ Key: Name, Value: novatrix-db-secret-v45 }]
+
+  # ---------------------------------------------------------
+  # 2. Databasen: RDS MariaDB i de privata subnaten.
+  #    DeletionPolicy Delete: i kursen rivs allt efter varje pass.
+  #    I drift hade jag haft Snapshot, sa att en slutlig snapshot
+  #    sparas om stacken raderas.
+  # ---------------------------------------------------------
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: novatrix-db-v45
+      Engine: mariadb
+      EngineVersion: "11.4"            # 11.8 kraver TLS for alla anslutningar
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true           # kryptering i vila med AWS-hanterad KMS-nyckel
+      MasterUsername: admin
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBName: wordpress
+      Port: !Ref DbPort
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSgId]
+      PubliclyAccessible: false        # ingen publik adress, gar bara att na inifran VPC:t
+      MultiAZ: false                   # en AZ racker for kursen, se dokumentationen
+      BackupRetentionPeriod: !Ref RdsBackupDays
+      PreferredBackupWindow: "01:00-01:30"              # UTC, mitt i natten i Sverige
+      PreferredMaintenanceWindow: "sun:02:00-sun:02:30"
+      DeleteAutomatedBackups: true
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+      Tags: [{ Key: Name, Value: novatrix-db-v45 }]
+
+  # ---------------------------------------------------------
+  # 3. Delad lagring: EFS for wp-content (teman, plugins, bilder).
+  #    Filerna overlever att webbservern byts ut, och flera
+  #    webbservrar kan dela samma filer.
+  # ---------------------------------------------------------
+  EfsSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: novatrix-efs-sg
+      GroupDescription: "EFS: NFS 2049 bara fran webbservern, ingen utgaende trafik"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 2049, ToPort: 2049, SourceSecurityGroupId: !Ref WebSgId, Description: NFS fran webbservern }
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Ingen utgaende trafik }
+      Tags: [{ Key: Name, Value: novatrix-efs-sg }]
+
+  # Webbserverns security group i v44 slapper bara ut 443 och 3306.
+  # Har oppnas 2049, men bara till EFS-gruppen.
+  WebSgTillEfs:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref WebSgId
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      DestinationSecurityGroupId: !Ref EfsSg
+      Description: NFS till EFS (v45)
+
+  # NACL:en pa de privata subnaten slapper bara in 3306 fran webben.
+  # Svaren (32768-65535 till webbsubnatet) ar redan tillatna i v44.
+  DbNaclInEfs:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref DbNaclId
+      RuleNumber: 110
+      Egress: false
+      Protocol: 6
+      RuleAction: allow
+      CidrBlock: !Ref WebCidr
+      PortRange: { From: 2049, To: 2049 }
+
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting           # ingen avgift per GB som lases, racker for en liten sajt
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS  # filer som inte anvants flyttas till billigare lagring
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      BackupPolicy: { Status: DISABLED } # databasen backas upp till S3, se dokumentationen
+      FileSystemTags: [{ Key: Name, Value: novatrix-efs-v45 }]
+
+  # En mount target per privat subnat (AZ). Webbservern anvander den i sin egen AZ.
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Select [0, !Ref DbSubnetIds]
+      SecurityGroups: [!Ref EfsSg]
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Select [1, !Ref DbSubnetIds]
+      SecurityGroups: [!Ref EfsSg]
+
+  # ---------------------------------------------------------
+  # 4. Objektlagring: S3-bucket for databasbackup.
+  #    Privat, krypterad, bara HTTPS, och livscykelregeln tar bort
+  #    allt under backup/ som ar aldre an S3BackupDays dagar.
+  # ---------------------------------------------------------
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete   # teardown.sh tommer bucketen forst
+    Properties:
+      BucketName: !Sub novatrix-backup-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: radera-backup-efter-14-dagar
+            Status: Enabled
+            Prefix: backup/
+            ExpirationInDays: !Ref S3BackupDays
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+      Tags: [{ Key: Name, Value: novatrix-backup }]
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: BaraHttps
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt BackupBucket.Arn, !Sub "${BackupBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  # ---------------------------------------------------------
+  # 5. Behorighet: webbserverns roll fran v43 far tva saker till,
+  #    och inget annat (least privilege):
+  #    - lasa just den har hemligheten (for wp-config.php och backup)
+  #    - skriva nya filer under backup/ i backup-bucketen
+  #    Tas bort automatiskt nar stacken raderas.
+  # ---------------------------------------------------------
+  WebRoleDataPolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref WebRoleName
+      PolicyName: novatrix-v45-data
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LasaDbHemligheten
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref DbSecret
+          - Sid: SkrivaBackup
+            Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub "${BackupBucket.Arn}/backup/*"
+
+Outputs:
+  DbEndpoint:     { Value: !GetAtt Database.Endpoint.Address }
+  DbInstanceId:   { Value: !Ref Database }
+  DbSecretArn:    { Value: !Ref DbSecret }
+  FileSystemId:   { Value: !Ref FileSystem }
+  EfsSgId:        { Value: !Ref EfsSg }
+  BackupBucket:   { Value: !Ref BackupBucket }
