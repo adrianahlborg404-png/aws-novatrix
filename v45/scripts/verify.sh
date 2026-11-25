@@ -169,7 +169,7 @@ if [ -f "$KEY_FIL" ]; then
   resultat "Webb: backup-timer aktiv (varje natt 02:00)"   enabled   "$(pa_webb 'systemctl is-enabled novatrix-backup.timer')"
 
   echo "    Kor en backup nu i stallet for att vanta till natten..."
-  pa_webb 'sudo systemctl start novatrix-backup.service && sudo journalctl -u novatrix-backup -n 1 -o cat' | sed 's/^/    /'
+  pa_webb 'sudo systemctl start novatrix-backup.service && sudo journalctl -u novatrix-backup -o cat | grep "Backup klar" | tail -1' | sed 's/^/    /'
   SENASTE=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix backup/ \
     --query 'sort_by(Contents,&LastModified)[-1].Key' --output text 2>/dev/null)
   resultat "Backup finns i S3 ($SENASTE)"                  JA "$([[ "$SENASTE" == backup/wordpress-*.sql.gz ]] && echo JA || echo NEJ)"
