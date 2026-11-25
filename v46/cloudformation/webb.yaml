@@ -265,6 +265,27 @@ Resources:
         - { Key: Roll, Value: webb }
 
   # ---------------------------------------------------------
+  # Larm for drift: CPU over 80 % i 10 minuter betyder att
+  # webbservern ar overbelastad. Tillagt som andring i v46
+  # (Delmoment 4) och infort med ett change set.
+  # ---------------------------------------------------------
+  WebCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-web-cpu-hog"
+      AlarmDescription: !Sub "CPU over 80 % i 10 minuter pa ${Prefix}-web"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref WebServer }
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: missing
+
+  # ---------------------------------------------------------
   # Bastion: enda vagen in for SSH. Ingen roll, ingen user data,
   # ingen vag ut mot internet (security group och NACL).
   # ---------------------------------------------------------
