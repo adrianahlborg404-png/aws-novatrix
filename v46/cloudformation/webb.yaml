@@ -81,7 +81,12 @@ Resources:
     Properties:
       KeyName: !Sub "${Prefix}-key"
       KeyType: ed25519
-      Tags: [{ Key: Name, Value: !Sub "${Prefix}-key" }]
+      # Stackens taggar (Projekt, Miljo) satts inte automatiskt pa key pairs,
+      # men driftkontrollen forvantar sig dem. Darfor skrivs de ut har.
+      Tags:
+        - { Key: Name, Value: !Sub "${Prefix}-key" }
+        - { Key: Projekt, Value: novatrix }
+        - { Key: Miljo, Value: !Ref Prefix }
 
   # ---------------------------------------------------------
   # Webbservern. En launch template samlar hur servern ska se ut
