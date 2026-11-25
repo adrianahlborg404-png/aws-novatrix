@@ -4,13 +4,14 @@ Kursprojekt där företaget **Novatrix AB** flyttar sin webbplats till AWS. En m
 
 > Projekt inom utbildningen Moln- och virtualiseringsspecialist, Campus Mölndal.
 
-**Teknik:** AWS EC2 · AWS IAM · STS · S3 · VPC · subnät och route tables · internet gateway · NACL · Security groups · bastion host · VPC Flow Logs · CloudWatch Logs · CloudFormation · AWS CLI · CloudShell · SSM Parameter Store · user data (cloud-init) · Amazon Linux 2023 · Apache · AWS Budgets · Bash
+**Teknik:** AWS EC2 · AWS IAM · STS · S3 (livscykelregler) · VPC · subnät och route tables · internet gateway · NACL · Security groups · bastion host · VPC Flow Logs · CloudWatch Logs · RDS (MariaDB) · EFS · Secrets Manager · CloudFormation · AWS CLI · CloudShell · SSM Parameter Store · user data (cloud-init) · Amazon Linux 2023 · Apache · PHP · WordPress · AWS Budgets · Bash
 
 | Vecka | Tema | Mapp |
 |---|---|---|
 | v42 | Compute – EC2-webbserver som skapas helt från kod | [v42](./v42) |
 | v43 | IAM – användare, grupper, policies och roller enligt least privilege | [v43](./v43) |
 | v44 | Nätverk och säkerhet – eget VPC, publika/privata subnät, NACL:er, security groups och bastion (defense in depth) | [v44](./v44) |
+| v45 | Lagring och databas – WordPress mot RDS och EFS, backup till S3 med livscykelregel | [v45](./v45) |
 
 Allt körs i **AWS CloudShell** i region **Stockholm (`eu-north-1`)**. Miljön rivs med `teardown.sh` efter varje arbetspass, och en budget i AWS Budgets (5 USD/mån) larmar innan något kostar.
 
@@ -128,6 +129,55 @@ SSH från datorn sker via bastion med `ProxyJump`. `deploy.sh` skriver ut ett f�
 **Resultat:** `verify.sh` gav **21 OK, 0 FEL**. Testet där ett lager öppnas i taget visar att NACL stoppar när security groupen är öppen, och tvärtom. Flow logs visade automatiska skanningar från internet mot SSH, RDP, MS SQL, MongoDB och Redis, som alla blockerades.
 
 **Filer:** [`natverk.yaml`](v44/cloudformation/natverk.yaml) · [`deploy.sh`](v44/scripts/deploy.sh) · [`user-data.sh`](v44/scripts/user-data.sh) · [`verify.sh`](v44/scripts/verify.sh) · [`visa-trafik.sh`](v44/scripts/visa-trafik.sh) · [`teardown.sh`](v44/scripts/teardown.sh) · [`natverk.svg`](v44/docs/natverk.svg)
+
+---
+
+## v45 – Lagring och databas (WordPress)
+
+WordPress-stacken tar form: en hanterad databas, delad lagring för WordPress-filerna och objektlagring för backup. Databasen ligger i de privata subnäten från v44 och nås bara från webbservern. Datalagret är kod i CloudFormation ([`data.yaml`](v45/cloudformation/data.yaml)) och läggs som en egen stack ovanpå nätverksstacken från v44. Rollen från v43 återanvänds.
+
+```mermaid
+flowchart LR
+    U[Webbläsare] -->|HTTP/HTTPS| W[EC2 novatrix-web-v45<br/>Apache + PHP + WordPress]
+    W -->|3306| DB[(RDS MariaDB 11.4<br/>privata subnät)]
+    W -->|NFS 2049 med TLS| EFS[(EFS<br/>wp-content)]
+    W -->|mysqldump varje natt| S3[(S3 novatrix-backup<br/>raderas efter 14 dagar)]
+    W -.->|läser lösenordet| SM[Secrets Manager]
+    A[Min dator] -->|SSH 22| B[Bastion] -->|SSH| W
+```
+
+**Byggt och valda nivåer**
+
+| Komponent | Val | Varför |
+|---|---|---|
+| RDS MariaDB 11.4 | `db.t3.micro`, 20 GB `gp3`, en AZ | Minsta klassen räcker för en liten sajt och ryms i Free plan. `gp3` ger 3 000 IOPS i grunden till samma pris som `gp2`. Multi-AZ dubblar kostnaden och väljs i drift när sajten inte får ligga nere. 11.4 i stället för 11.8, som kräver TLS för alla anslutningar. |
+| RDS automatisk backup | 1 dag (max på Free plan) | I drift hade jag valt **7 dagar**: ett fel som görs på fredagen och upptäcks på måndagen går fortfarande att återställa, med point-in-time restore till valfri minut. Backuputrymme upp till databasens storlek ingår utan extra kostnad. |
+| EFS | Regional, `bursting`, krypterad, IA efter 30 dagar | Filerna överlever att webbservern byts ut, och flera webbservrar kan dela dem. `bursting` har ingen avgift per läst GB. Filer som inte används flyttas till billigare Infrequent Access. One Zone hade varit ungefär hälften så dyrt, men faller om AZ:n faller. |
+| S3 `novatrix-backup-<konto>` | Privat, AES256, bara HTTPS, livscykelregel | En `mysqldump` varje natt kl 02:00. Regeln raderar filer under `backup/` efter **14 dagar**, så lagringen växer inte för evigt. |
+| Lösenord | Secrets Manager | Genereras när stacken skapas. Finns aldrig i repot, skripten eller loggarna. `wp-config.php` skrivs av user data, så WordPress-installationen frågar inte efter något lösenord. |
+
+**Säker åtkomst i lager**
+
+| Lager | Skydd |
+|---|---|
+| Routing | De privata subnäten har ingen väg till internet. |
+| NACL | De privata subnäten släpper bara in 3306 och 2049, och bara från webbsubnätet. |
+| Security groups | `db-sg` och `efs-sg` släpper bara in `web-sg`, och har ingen utgående trafik. Webbservern får bara 443 ut, plus 3306 och 2049 till just de grupperna. |
+| Ingen publik adress | `PubliclyAccessible: false`, DNS-namnet pekar på en privat IP. |
+| Kryptering | RDS, EFS och S3 i vila. EFS även på vägen (`tls`). S3 nekar allt utan HTTPS. |
+| IAM | Rollen får bara läsa *den här* hemligheten och bara skriva nya filer under `backup/`. |
+
+**Kör**
+```bash
+cd aws-novatrix/v43/scripts && bash iam-setup.sh
+cd ../../v45/scripts
+bash deploy.sh <DIN-PUBLIKA-IP>   # nätverk (v44) + datastack + WordPress-server + bastion
+# öppna http://<webb-ip> och kör WordPress-installationen (språk, namn, admin-konto)
+bash verify.sh                    # WordPress, databas, EFS, S3, åtkomst och en backup
+bash teardown.sh                  # allt, även nätverket och IAM
+```
+
+**Filer:** [`data.yaml`](v45/cloudformation/data.yaml) · [`deploy.sh`](v45/scripts/deploy.sh) · [`user-data.sh`](v45/scripts/user-data.sh) · [`verify.sh`](v45/scripts/verify.sh) · [`teardown.sh`](v45/scripts/teardown.sh)
 
 ---
 
