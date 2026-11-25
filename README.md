@@ -1,10 +1,12 @@
 # AWS-miljö från kod – Novatrix webbplats i AWS
 
+[![CI](https://github.com/adrianahlborg404-png/aws-novatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/adrianahlborg404-png/aws-novatrix/actions/workflows/ci.yml)
+
 Kursprojekt där företaget **Novatrix AB** flyttar sin webbplats till AWS. En mapp per vecka, och varje vecka bygger vidare på samma miljö. Allt skapas och rivs med skript från repot, utan klick i konsolen.
 
 > Projekt inom utbildningen Moln- och virtualiseringsspecialist, Campus Mölndal.
 
-**Teknik:** AWS EC2 · AWS IAM · STS · S3 (livscykelregler) · VPC · subnät och route tables · internet gateway · NACL · Security groups · bastion host · VPC Flow Logs · CloudWatch Logs · RDS (MariaDB) · EFS · Secrets Manager · CloudFormation · AWS CLI · CloudShell · SSM Parameter Store · user data (cloud-init) · Amazon Linux 2023 · Apache · PHP · WordPress · AWS Budgets · Bash
+**Teknik:** AWS EC2 · AWS IAM · STS · S3 (livscykelregler) · VPC · subnät och route tables · internet gateway · NACL · Security groups · bastion host · VPC Flow Logs · CloudWatch Logs · RDS (MariaDB) · EFS · Secrets Manager · CloudFormation (exports/imports, change sets, drift detection) · AWS CLI · CloudShell · SSM Parameter Store · user data (cloud-init) · Amazon Linux 2023 · Apache · PHP · WordPress · AWS Budgets · Bash · Git · GitHub Actions · ShellCheck · cfn-lint
 
 | Vecka | Tema | Mapp |
 |---|---|---|
@@ -12,6 +14,7 @@ Kursprojekt där företaget **Novatrix AB** flyttar sin webbplats till AWS. En m
 | v43 | IAM – användare, grupper, policies och roller enligt least privilege | [v43](./v43) |
 | v44 | Nätverk och säkerhet – eget VPC, publika/privata subnät, NACL:er, security groups och bastion (defense in depth) | [v44](./v44) |
 | v45 | Lagring och databas – WordPress mot RDS och EFS, backup till S3 med livscykelregel | [v45](./v45) |
+| v46 | IaC med CloudFormation – hela stacken som kod i tre lager, parametriserad, med CI i GitHub Actions | [v46](./v46) |
 
 Allt körs i **AWS CloudShell** i region **Stockholm (`eu-north-1`)**. Miljön rivs med `teardown.sh` efter varje arbetspass, och en budget i AWS Budgets (5 USD/mån) larmar innan något kostar.
 
@@ -178,6 +181,94 @@ bash teardown.sh                  # allt, även nätverket och IAM
 ```
 
 **Filer:** [`data.yaml`](v45/cloudformation/data.yaml) · [`deploy.sh`](v45/scripts/deploy.sh) · [`user-data.sh`](v45/scripts/user-data.sh) · [`verify.sh`](v45/scripts/verify.sh) · [`teardown.sh`](v45/scripts/teardown.sh)
+
+---
+
+## v46 – IaC med CloudFormation (hela stacken som kod)
+
+Hela miljön från v42–v45 är nu kod: nätverk, säkerhet, IAM-roll, databas, lagring och servrar. Tre stackar byggs med ett kommando och rivs med ett annat, utan ett enda steg i konsolen och utan något kvar från tidigare veckor. Strukturen följer kursens startpaket (tre lager, `Prefix`, samma exportnamn), fylld med mitt eget nät från v44.
+
+```mermaid
+flowchart LR
+    R[GitHub-repo<br/>v46/cloudformation] -->|git clone / git pull| C[CloudShell<br/>bash deploy.sh]
+    C --> N[novatrix-natverk<br/>VPC, subnät, NACL,<br/>security groups, flow logs]
+    N -->|exports: subnät, SG, port| D[novatrix-data<br/>RDS, Secrets Manager,<br/>EFS, S3-backup]
+    N -->|exports| W[novatrix-webb<br/>roll, key pair,<br/>WordPress, bastion]
+    D -->|exports: endpoint, hemlighet,<br/>EFS, bucket| W
+```
+
+**De tre lagren**
+
+| Stack | Mall | Innehåll |
+|---|---|---|
+| `novatrix-natverk` | [`natverk.yaml`](v46/cloudformation/natverk.yaml) | VPC, 2 publika och 2 privata subnät (adresserna räknas ut från `VpcCidr` med `!Cidr`), routing, en NACL per subnät, security groups för bastion, webb, databas och EFS, VPC Flow Logs |
+| `novatrix-data` | [`data.yaml`](v46/cloudformation/data.yaml) | Subnet group, lösenord i Secrets Manager, RDS MariaDB, EFS med mount targets i båda AZ, S3-bucket för backup med livscykelregel |
+| `novatrix-webb` | [`webb.yaml`](v46/cloudformation/webb.yaml) | Webbserverns roll, key pair, launch templates med IMDSv2, WordPress-servern och bastion |
+
+Lagren hänger ihop med **exports och `!ImportValue`**, så det finns inga ID:n att klistra in. Det styr också ordningen: en stack vars exports används går inte att radera, så rivningen sker i omvänd ordning (webb → data → nätverk).
+
+**Från skript till kod**
+
+| Tidigare | I v46 |
+|---|---|
+| v43: `iam-setup.sh` skapar rollen med CLI | `AWS::IAM::Role` i `webb.yaml` |
+| v42–v45: key pair och EC2 med `aws ec2 run-instances` | `AWS::EC2::KeyPair`, launch templates och `AWS::EC2::Instance`. Privata nyckeln sparas av AWS i SSM Parameter Store och hämtas av `deploy.sh` |
+| v45: skriptet läser ID:n från v44 och skickar dem som parametrar | `!ImportValue`, inga ID:n i skripten |
+| v45: datastacken lägger regler i v44:s security groups och NACL | Alla regler ligger i nätverksmallen, inget ändras utanför sin egen stack |
+| Man ser inte om servern faktiskt blev klar | `CreationPolicy` + `cfn-signal`: webbstacken blir klar först när WordPress svarar och når databasen. Annars rullas den tillbaka. |
+
+**Parametriserat och återanvändbart**
+
+Det som skiljer en miljö från en annan står i en parameterfil, inte i mallarna. Allt får namn från `Prefix`, även exports, buckets och roller. Därför kan en andra, helt fristående kopia byggas i samma konto:
+
+```bash
+bash deploy.sh -p ../parametrar/novatrix-test.env <DIN-PUBLIKA-IP>   # novatrix-test-*, VPC 10.1.0.0/16
+bash teardown.sh -p ../parametrar/novatrix-test.env
+```
+
+| Parameterfil | Innehåll |
+|---|---|
+| [`novatrix.env`](v46/parametrar/novatrix.env) | Kursmiljön: `PREFIX=novatrix`, `VPC_CIDR=10.0.0.0/16`, instanstyp, RDS-klass, lagring och backupdagar |
+| [`novatrix-test.env`](v46/parametrar/novatrix-test.env) | Samma kod, `PREFIX=novatrix-test` och `VPC_CIDR=10.1.0.0/16` |
+
+**Varför mitt eget nät i stället för startpaketets**
+
+Startpaketets `natverk.yaml` har ett publikt subnät där webbservern tar emot SSH direkt från min IP, en NACL och fri utgående trafik. Jag har behållit strukturen (stacknamn, `Prefix`, `MyIp` och exportnamnen som de andra lagren importerar), men fyllt den med nätet från v44. Uppgiften är att göra *min* stack till kod, och VG-kravet är säkerhet i flera lager:
+
+- **Bastion i ett eget mgmt-subnät.** Webbservern exponerar aldrig port 22 mot internet.
+- **En NACL per subnät** (webb, mgmt, privat) i stället för en.
+- **Begränsad utgående trafik.** Webben får bara 443 ut, plus databasen och EFS. Databasen, EFS och bastion når inte internet alls.
+- **VPC Flow Logs**, så att jag kan visa vad som släpps igenom och vad som blockeras.
+
+Adresserna skiljer sig därför från skelettet: där är `10.0.2.0/24` ett privat subnät, hos mig är det mgmt-subnätet. De privata subnäten ligger kvar på `10.0.11.0/24` och `10.0.12.0/24` som i v44.
+
+**Versionshantering som arbetsverktyg**
+
+Alla ändringar går via Git. Ingenting ändras för hand i konsolen.
+
+1. Ändra mallen, committa och pusha. **CI** i GitHub Actions kontrollerar skripten (`bash -n`, ShellCheck) och mallarna (cfn-lint) och ger en grön bock eller ett rött kryss.
+2. `git pull` i CloudShell.
+3. `bash andring.sh <lager>` skapar ett **change set** och visar vad som kommer att läggas till, ändras eller ersättas, *innan* något rörs.
+4. `j` kör ändringen, `n` kastar change setet.
+5. `verify.sh` kör **drift detection**, som visar om någon har ändrat något i konsolen som inte finns i koden.
+
+**Kör (återskapa hela stacken från repot)**
+
+Från ett tomt konto behövs bara CloudShell och repot. Ingenting från v42–v45 behöver finnas.
+
+```bash
+git clone https://github.com/adrianahlborg404-png/aws-novatrix.git
+cd aws-novatrix/v46/scripts
+bash deploy.sh <DIN-PUBLIKA-IP>   # validera, nätverk -> data -> webb, 15-25 min första gången
+# öppna http://<webb-ip> och kör WordPress-installationen (språk, namn, admin-konto)
+bash verify.sh                    # stackar, drift, WordPress, data, lagring och åtkomst
+bash andring.sh webb              # en ändring visas som change set innan den körs
+bash teardown.sh                  # webb -> data -> nätverk
+```
+
+`deploy.sh` är samma kommando för att skapa och för att uppdatera: CloudFormation räknar ut skillnaden. Kursens två demomallar från startpaketet ligger i [`v46/demo`](v46/demo).
+
+**Filer:** [`natverk.yaml`](v46/cloudformation/natverk.yaml) · [`data.yaml`](v46/cloudformation/data.yaml) · [`webb.yaml`](v46/cloudformation/webb.yaml) · [`parametrar/`](v46/parametrar) · [`deploy.sh`](v46/scripts/deploy.sh) · [`verify.sh`](v46/scripts/verify.sh) · [`andring.sh`](v46/scripts/andring.sh) · [`teardown.sh`](v46/scripts/teardown.sh) · [`ci.yml`](.github/workflows/ci.yml)
 
 ---
 
