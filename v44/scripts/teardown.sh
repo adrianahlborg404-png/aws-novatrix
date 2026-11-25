@@ -10,7 +10,7 @@
 # =============================================================
 set -uo pipefail
 export AWS_DEFAULT_REGION="eu-north-1"
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 STACK="novatrix-natverk-v44"
 
 echo "==> 1/4 EC2-instanser"

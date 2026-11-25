@@ -62,7 +62,7 @@ logga_in_som() {  # anvandare -> satter AK och SK
   # En ny nyckel godkanns av STS direkt men kan ta nagra sekunder innan EC2 kanner igen den.
   # Vanta tills EC2 svarar med nagot annat an AuthFailure (tillatet eller nekat spelar ingen roll).
   local ut
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     ut=$(som ec2 describe-instances --dry-run 2>&1)
     [[ "$ut" == *AuthFailure* || "$ut" == *"validate the provided access credentials"* ]] || return 0
     sleep 3
@@ -116,7 +116,7 @@ echo ""
 echo "==> 4/4 Kedjan erik-utv -> deploy-roll -> S3 -> EC2-roll -> webbsida"
 echo "    Vantar pa att instansen synkar fran S3 (upp till 90 s)..."
 SYNKAD="NEKAT"
-for i in $(seq 1 18); do
+for _ in $(seq 1 18); do
   if curl -s "http://${PUBLIK_IP}" | grep -q "$STAMPEL"; then SYNKAD="TILLATET"; break; fi
   sleep 5
 done

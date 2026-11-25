@@ -67,7 +67,7 @@ echo "==> 5/6 Startar EC2-instans med rollen $PROFIL"
 UD=$(mktemp)
 sed "s/__BUCKET__/${BUCKET}/g" user-data.sh > "$UD"
 # En ny instance profile kan ta nagra sekunder innan EC2 ser den, darfor nya forsok
-for i in 1 2 3 4 5 6; do
+for _ in 1 2 3 4 5 6; do
   INSTANS_ID=$(aws ec2 run-instances \
     --image-id "$AMI_ID" \
     --instance-type "$INSTANSTYP" \

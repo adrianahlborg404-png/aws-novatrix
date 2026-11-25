@@ -13,7 +13,7 @@
 # =============================================================
 set -uo pipefail
 export AWS_DEFAULT_REGION="eu-north-1"
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 STACK="novatrix-natverk-v44"
 KEY_FIL="$(pwd)/novatrix-v44-key.pem"

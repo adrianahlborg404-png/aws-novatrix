@@ -26,7 +26,7 @@ chmod 600 /etc/pki/tls/private/localhost.key
 systemctl enable --now httpd
 
 # 3. Hamta webbsidan fran S3 (forsok igen tills rollens credentials finns)
-for i in $(seq 1 10); do
+for _ in $(seq 1 10); do
   aws s3 cp "s3://${BUCKET}/webb/index.html" /var/www/html/index.html && break
   sleep 5
 done
