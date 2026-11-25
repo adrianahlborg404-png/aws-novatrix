@@ -139,15 +139,7 @@ SSH från datorn sker via bastion med `ProxyJump`. `deploy.sh` skriver ut ett f�
 
 WordPress-stacken tar form: en hanterad databas, delad lagring för WordPress-filerna och objektlagring för backup. Databasen ligger i de privata subnäten från v44 och nås bara från webbservern. Datalagret är kod i CloudFormation ([`data.yaml`](v45/cloudformation/data.yaml)) och läggs som en egen stack ovanpå nätverksstacken från v44. Rollen från v43 återanvänds.
 
-```mermaid
-flowchart LR
-    U[Webbläsare] -->|HTTP/HTTPS| W[EC2 novatrix-web-v45<br/>Apache + PHP + WordPress]
-    W -->|3306| DB[(RDS MariaDB 11.4<br/>privata subnät)]
-    W -->|NFS 2049 med TLS| EFS[(EFS<br/>wp-content)]
-    W -->|mysqldump varje natt| S3[(S3 novatrix-backup<br/>raderas efter 14 dagar)]
-    W -.->|läser lösenordet| SM[Secrets Manager]
-    A[Min dator] -->|SSH 22| B[Bastion] -->|SSH| W
-```
+![Arkitektur v45](v45/docs/arkitektur.png)
 
 **Byggt och valda nivåer**
 
@@ -180,7 +172,9 @@ bash verify.sh                    # WordPress, databas, EFS, S3, åtkomst och en
 bash teardown.sh                  # allt, även nätverket och IAM
 ```
 
-**Filer:** [`data.yaml`](v45/cloudformation/data.yaml) · [`deploy.sh`](v45/scripts/deploy.sh) · [`user-data.sh`](v45/scripts/user-data.sh) · [`verify.sh`](v45/scripts/verify.sh) · [`teardown.sh`](v45/scripts/teardown.sh)
+**Resultat:** `verify.sh` gav **27 OK, 0 FEL**. WordPress är installerat mot RDS (12 tabeller) med uppladdade filer på EFS, databasen och EFS nås bara från webbservern, och en databasdump hamnade i `backup/` i S3.
+
+**Filer:** [`data.yaml`](v45/cloudformation/data.yaml) · [`deploy.sh`](v45/scripts/deploy.sh) · [`user-data.sh`](v45/scripts/user-data.sh) · [`verify.sh`](v45/scripts/verify.sh) · [`teardown.sh`](v45/scripts/teardown.sh) · [`arkitektur.svg`](v45/docs/arkitektur.svg)
 
 ---
 
