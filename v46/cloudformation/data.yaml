@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Novatrix datalager (v45 som kod). Stack: <prefix>-data. Kraver natverksstacken.
+  RDS MariaDB i de privata subnaten med losenord i Secrets Manager, EFS for
+  WordPress-filerna och en S3-bucket for databasbackup med livscykelregel.
+
+# =============================================================
+# Lager 2 av 3: natverk -> data -> webb.
+# Allt som kommer fran natverket hamtas med !ImportValue, sa det
+# finns inga ID:n att klistra in. Prefix valjer vilken miljo.
+#
+# Sakerhet runt datat:
+#   - privata subnat utan internetvag, NACL och security groups (natverket)
+#   - PubliclyAccessible false: databasen har ingen publik adress
+#   - kryptering i vila: RDS, EFS och S3. EFS ocksa pa vagen (tls i user data)
+#   - losenordet genereras av Secrets Manager och finns aldrig i koden
+#   - backup-bucketen: privat, bara HTTPS, raderar gamla backuper sjalv
+# =============================================================
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    AllowedPattern: "[a-z][a-z0-9-]*"
+    Description: Samma prefix som natverksstacken
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small]
+  DbStorageGb:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+  RdsBackupDays:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 35
+    Description: Automatisk RDS-backup. Free plan tillater max 1 dag, i drift 7.
+  S3BackupDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    Description: Backuper i S3 aldre an sa har manga dagar tas bort automatiskt
+
+Resources:
+  # ---------------------------------------------------------
+  # Subnet group: vilka subnat RDS far placera databasen i
+  # ---------------------------------------------------------
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub "${Prefix}-db-subnets"
+      DBSubnetGroupDescription: Privata subnat for Novatrix databas
+      SubnetIds:
+        - !ImportValue { "Fn::Sub": "${Prefix}-private-a-id" }
+        - !ImportValue { "Fn::Sub": "${Prefix}-private-b-id" }
+
+  # ---------------------------------------------------------
+  # Losenordet: genereras av Secrets Manager nar stacken skapas
+  # ---------------------------------------------------------
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub "Admin-losenord for ${Prefix}-db"
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        ExcludePunctuation: true   # inga tecken som kan krangla i wp-config.php
+
+  # ---------------------------------------------------------
+  # Databasen. DeletionPolicy Delete: i kursen rivs allt efter
+  # varje pass. I drift: Snapshot, sa att en slutlig kopia sparas.
+  # ---------------------------------------------------------
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${Prefix}-db"
+      Engine: mariadb
+      EngineVersion: "11.4"            # 11.8 kraver TLS for alla anslutningar
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: admin
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBName: wordpress
+      Port: !ImportValue { "Fn::Sub": "${Prefix}-db-port" }
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue { "Fn::Sub": "${Prefix}-db-sg-id" }
+      PubliclyAccessible: false
+      MultiAZ: false                   # en AZ racker for kursen, se dokumentationen
+      BackupRetentionPeriod: !Ref RdsBackupDays
+      PreferredBackupWindow: "01:00-01:30"              # UTC, mitt i natten i Sverige
+      PreferredMaintenanceWindow: "sun:02:00-sun:02:30"
+      DeleteAutomatedBackups: true
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-db" }]
+
+  # ---------------------------------------------------------
+  # EFS for wp-content, en mount target per privat subnat
+  # ---------------------------------------------------------
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting           # ingen avgift per last GB, racker for en liten sajt
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+        - TransitionToPrimaryStorageClass: AFTER_1_ACCESS
+      BackupPolicy: { Status: DISABLED } # databasen backas upp till S3, se dokumentationen
+      FileSystemTags: [{ Key: Name, Value: !Sub "${Prefix}-efs" }]
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-private-a-id" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-efs-sg-id" }]
+
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-private-b-id" }
+      SecurityGroups: [!ImportValue { "Fn::Sub": "${Prefix}-efs-sg-id" }]
+
+  # ---------------------------------------------------------
+  # S3 for databasbackup. Livscykelregeln raderar backup/ efter
+  # S3BackupDays dagar, sa att lagringen inte vaxer for evigt.
+  # ---------------------------------------------------------
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete   # teardown.sh tommer bucketen forst
+    Properties:
+      BucketName: !Sub "${Prefix}-backup-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: radera-gamla-backuper
+            Status: Enabled
+            Prefix: backup/
+            ExpirationInDays: !Ref S3BackupDays
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-backup" }]
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: BaraHttps
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt BackupBucket.Arn, !Sub "${BackupBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+Outputs:
+  DbSecretArn:
+    Value: !Ref DbSecret
+    Export: { Name: !Sub "${Prefix}-db-secret-arn" }
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export: { Name: !Sub "${Prefix}-db-endpoint" }
+  FileSystemId:
+    Value: !Ref FileSystem
+    Export: { Name: !Sub "${Prefix}-efs-id" }
+  BackupBucket:
+    Value: !Ref BackupBucket
+    Export: { Name: !Sub "${Prefix}-backup-bucket" }
+  DbInstanceId:   { Value: !Ref Database }
