@@ -182,14 +182,7 @@ bash teardown.sh                  # allt, även nätverket och IAM
 
 Hela miljön från v42–v45 är nu kod: nätverk, säkerhet, IAM-roll, databas, lagring och servrar. Tre stackar byggs med ett kommando och rivs med ett annat, utan ett enda steg i konsolen och utan något kvar från tidigare veckor. Strukturen följer kursens startpaket (tre lager, `Prefix`, samma exportnamn), fylld med mitt eget nät från v44.
 
-```mermaid
-flowchart LR
-    R[GitHub-repo<br/>v46/cloudformation] -->|git clone / git pull| C[CloudShell<br/>bash deploy.sh]
-    C --> N[novatrix-natverk<br/>VPC, subnät, NACL,<br/>security groups, flow logs]
-    N -->|exports: subnät, SG, port| D[novatrix-data<br/>RDS, Secrets Manager,<br/>EFS, S3-backup]
-    N -->|exports| W[novatrix-webb<br/>roll, key pair,<br/>WordPress, bastion]
-    D -->|exports: endpoint, hemlighet,<br/>EFS, bucket| W
-```
+![IaC-flöde v46](v46/docs/iac.png)
 
 **De tre lagren**
 
@@ -262,7 +255,9 @@ bash teardown.sh                  # webb -> data -> nätverk
 
 `deploy.sh` är samma kommando för att skapa och för att uppdatera: CloudFormation räknar ut skillnaden. Kursens två demomallar från startpaketet ligger i [`v46/demo`](v46/demo).
 
-**Filer:** [`natverk.yaml`](v46/cloudformation/natverk.yaml) · [`data.yaml`](v46/cloudformation/data.yaml) · [`webb.yaml`](v46/cloudformation/webb.yaml) · [`parametrar/`](v46/parametrar) · [`deploy.sh`](v46/scripts/deploy.sh) · [`verify.sh`](v46/scripts/verify.sh) · [`andring.sh`](v46/scripts/andring.sh) · [`teardown.sh`](v46/scripts/teardown.sh) · [`ci.yml`](.github/workflows/ci.yml)
+**Resultat:** hela stacken byggdes från ett tomt konto med `deploy.sh` på cirka 15 minuter. `verify.sh` gav **35 OK, 1 FEL**. Felet var drift på key pairen: CloudFormation förväntar sig stackens taggar (`Projekt`, `Miljo`) men sätter dem inte på key pairs. Ingen ändring hade gjorts utanför koden, och taggarna står nu direkt i mallen. Ändringen för Delmoment 4 (CPU-larmet `WebCpuAlarm`) infördes via commit, CI och change set.
+
+**Filer:** [`natverk.yaml`](v46/cloudformation/natverk.yaml) · [`data.yaml`](v46/cloudformation/data.yaml) · [`webb.yaml`](v46/cloudformation/webb.yaml) · [`parametrar/`](v46/parametrar) · [`deploy.sh`](v46/scripts/deploy.sh) · [`verify.sh`](v46/scripts/verify.sh) · [`andring.sh`](v46/scripts/andring.sh) · [`teardown.sh`](v46/scripts/teardown.sh) · [`ci.yml`](.github/workflows/ci.yml) · [`iac.svg`](v46/docs/iac.svg)
 
 ---
 

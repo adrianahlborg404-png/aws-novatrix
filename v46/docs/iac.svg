@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" font-family="Inter, DejaVu Sans, sans-serif">
+  <defs>
+    <marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .t  { font-size: 13px; font-weight: 600; fill: #0f172a; }
+      .s  { font-size: 11px; fill: #334155; }
+      .l  { font-size: 11px; fill: #475569; }
+      .p  { font-size: 10.5px; font-weight: 600; fill: #1e3a5f; }
+      .a  { stroke: #334155; stroke-width: 1.6; fill: none; marker-end: url(#p); }
+    </style>
+  </defs>
+
+  <!-- GitHub -->
+  <rect x="20" y="30" width="230" height="110" rx="8" fill="#ffffff" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="135" y="58" text-anchor="middle" class="t">GitHub-repo aws-novatrix</text>
+  <text x="135" y="78" text-anchor="middle" class="s">v46/cloudformation/</text>
+  <text x="135" y="94" text-anchor="middle" class="s">natverk.yaml · data.yaml · webb.yaml</text>
+  <text x="135" y="110" text-anchor="middle" class="s">v46/parametrar/ · v46/scripts/</text>
+  <text x="135" y="126" text-anchor="middle" class="s">all ändring via commit</text>
+
+  <rect x="20" y="185" width="230" height="95" rx="8" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.3"/>
+  <text x="135" y="212" text-anchor="middle" class="t">GitHub Actions (CI)</text>
+  <text x="135" y="232" text-anchor="middle" class="s">bash -n · ShellCheck</text>
+  <text x="135" y="248" text-anchor="middle" class="s">cfn-lint (eu-north-1)</text>
+  <text x="135" y="266" text-anchor="middle" class="s">grön bock eller rött kryss</text>
+  <path class="a" d="M135,140 L135,183"/>
+  <text x="143" y="166" class="p">varje push</text>
+
+  <rect x="20" y="330" width="230" height="140" rx="8" fill="#ffffff" stroke="#0f172a" stroke-width="1.3"/>
+  <text x="135" y="357" text-anchor="middle" class="t">AWS CloudShell</text>
+  <text x="135" y="378" text-anchor="middle" class="s">git pull</text>
+  <text x="135" y="394" text-anchor="middle" class="s">deploy.sh · andring.sh</text>
+  <text x="135" y="410" text-anchor="middle" class="s">verify.sh · teardown.sh</text>
+  <text x="135" y="430" text-anchor="middle" class="s">parametrar/novatrix.env</text>
+  <text x="135" y="452" text-anchor="middle" class="l">inga klick i konsolen</text>
+  <path class="a" d="M20,85 L8,85 L8,400 L18,400"/>
+  <text x="22" y="318" class="p">git clone / pull ↓</text>
+
+  <!-- AWS -->
+  <rect x="290" y="20" width="695" height="455" rx="10" fill="#fafafa" stroke="#94a3b8" stroke-dasharray="6 4"/>
+  <text x="305" y="42" class="t">AWS eu-north-1 · CloudFormation</text>
+
+  <!-- natverk -->
+  <rect x="310" y="120" width="205" height="300" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4"/>
+  <text x="412" y="146" text-anchor="middle" class="t">1. novatrix-natverk</text>
+  <text x="412" y="164" text-anchor="middle" class="l">natverk.yaml</text>
+  <text x="325" y="192" class="s">VPC 10.0.0.0/16</text>
+  <text x="325" y="210" class="s">2 publika + 2 privata subnät</text>
+  <text x="325" y="228" class="s">routing, IGW</text>
+  <text x="325" y="246" class="s">NACL per subnät (3)</text>
+  <text x="325" y="264" class="s">SG: bastion, webb, db, efs</text>
+  <text x="325" y="282" class="s">VPC Flow Logs + roll</text>
+  <text x="325" y="318" class="l">exporterar:</text>
+  <text x="325" y="336" class="s">vpc-id, subnät-id:n,</text>
+  <text x="325" y="352" class="s">sg-id:n, db-port</text>
+
+  <!-- data -->
+  <rect x="545" y="120" width="205" height="300" rx="8" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4"/>
+  <text x="647" y="146" text-anchor="middle" class="t">2. novatrix-data</text>
+  <text x="647" y="164" text-anchor="middle" class="l">data.yaml</text>
+  <text x="560" y="192" class="s">DB subnet group</text>
+  <text x="560" y="210" class="s">Secrets Manager (lösenord)</text>
+  <text x="560" y="228" class="s">RDS MariaDB 11.4</text>
+  <text x="560" y="246" class="s">EFS + 2 mount targets</text>
+  <text x="560" y="264" class="s">S3 backup, livscykel 14 d</text>
+  <text x="560" y="282" class="s">bucket policy: bara HTTPS</text>
+  <text x="560" y="318" class="l">exporterar:</text>
+  <text x="560" y="336" class="s">db-endpoint, secret-arn,</text>
+  <text x="560" y="352" class="s">efs-id, backup-bucket</text>
+
+  <!-- webb -->
+  <rect x="780" y="120" width="190" height="300" rx="8" fill="#ecfdf5" stroke="#059669" stroke-width="1.4"/>
+  <text x="875" y="146" text-anchor="middle" class="t">3. novatrix-webb</text>
+  <text x="875" y="164" text-anchor="middle" class="l">webb.yaml</text>
+  <text x="793" y="192" class="s">IAM-roll (least privilege)</text>
+  <text x="793" y="210" class="s">key pair (nyckel i SSM)</text>
+  <text x="793" y="228" class="s">launch templates, IMDSv2</text>
+  <text x="793" y="246" class="s">WordPress-server</text>
+  <text x="793" y="264" class="s">+ cfn-signal</text>
+  <text x="793" y="282" class="s">bastion</text>
+  <text x="793" y="300" class="s">CPU-larm (Delmoment 4)</text>
+
+  <!-- exports -->
+  <path class="a" d="M515,215 L543,215"/>
+  <path class="a" d="M750,215 L778,215"/>
+  <path class="a" d="M412,120 L412,88 L875,88 L875,118"/>
+  <text x="530" y="82" class="p">exports läses med !ImportValue (pilarna)</text>
+
+  <!-- deploy -->
+  <path class="a" d="M250,400 L308,400"/>
+  <text x="254" y="392" class="p">deploy.sh</text>
+
+  <text x="310" y="450" class="l">Byggs i ordning 1 → 2 → 3. Rivs i omvänd ordning 3 → 2 → 1: en export som används kan inte tas bort.</text>
+  <text x="310" y="466" class="l">Allt namnges från Prefix, så samma mallar kan bygga en andra miljö (t.ex. novatrix-test).</text>
+</svg>
