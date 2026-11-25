@@ -1,0 +1,67 @@
+# =============================================================
+# ci.yml - Novatrix AB, AWS-kursen
+# Kontrollerar koden vid varje push och pull request, sa att
+# repot visar en gron bock (eller ett rott kryss) innan nagot
+# kors mot AWS. Ingen AWS-atkomst behovs, bara koden i repot.
+#   - Skript:  bash -n (syntax) och ShellCheck (vanliga buggar)
+#   - Mallar:  cfn-lint (CloudFormation-regler, region Stockholm)
+# =============================================================
+name: CI
+
+on:
+  push:                 # varje push, alla brancher
+  pull_request:         # nar en pull request oppnas
+  workflow_dispatch:    # knappen "Run workflow" under Actions
+
+permissions:
+  contents: read        # jobben far bara lasa koden
+
+jobs:
+  skript:
+    name: Skript (bash -n och ShellCheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hamta koden
+        uses: actions/checkout@v6
+
+      - name: Syntaxkontroll (bash -n)
+        run: |
+          find . -name '*.sh' -not -path './.git/*' -print0 | sort -z |
+          while IFS= read -r -d '' fil; do
+            echo "Kontrollerar $fil"
+            bash -n "$fil"
+          done
+
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          find . -name '*.sh' -not -path './.git/*' -print0 \
+            | xargs -0 shellcheck --severity=warning
+
+      - name: Webbsidan fran v42 finns
+        run: |
+          test -f v42/webb/index.html
+          echo "OK, v42/webb/index.html finns"
+
+  mallar:
+    name: CloudFormation (cfn-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hamta koden
+        uses: actions/checkout@v6
+
+      - name: Installera cfn-lint
+        run: |
+          pipx install cfn-lint
+          cfn-lint --version
+
+      - name: Kontrollera mallarna
+        # cfn-lint returnerar en bitmask: 2 = fel, 4 = varning, 8 = info.
+        # Fel faller bygget, varningar visas i loggen men stoppar inte.
+        run: |
+          set +e
+          cfn-lint --regions eu-north-1 -- v4*/cloudformation/*.yaml v46/demo/*.yaml
+          rc=$?
+          echo "cfn-lint slutkod: $rc"
+          if [ $((rc & 2)) -ne 0 ]; then echo "Fel i mallarna"; exit 1; fi
+          echo "Inga fel i mallarna"
