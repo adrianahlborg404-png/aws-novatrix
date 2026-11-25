@@ -1,0 +1,305 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Novatrix webblager (v42, v43 och v45 som kod). Stack: <prefix>-webb.
+  Kraver natverks- och datastacken. Webbserverns roll, key pair, webbservern
+  med WordPress (EFS pa wp-content, databasen fran Secrets Manager, nattlig
+  backup till S3) och en bastion for SSH.
+
+# =============================================================
+# Lager 3 av 3: natverk -> data -> webb. Byggs sist, rivs forst.
+#
+# Inga manuella steg:
+#   - key pair skapas har, privata nyckeln sparas av AWS i SSM
+#     Parameter Store och hamtas av deploy.sh
+#   - wp-config.php skrivs av user data med losenordet fran
+#     Secrets Manager, ingen behover skriva in det
+#   - CreationPolicy + cfn-signal: stacken blir CREATE_COMPLETE forst
+#     nar WordPress svarar och nar databasen. Gar nagot fel rullas
+#     stacken tillbaka i stallet for att lamna en trasig server.
+# =============================================================
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix
+    AllowedPattern: "[a-z][a-z0-9-]*"
+    Description: Samma prefix som natverks- och datastacken
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Senaste Amazon Linux 2023, slas upp nar stacken deployas
+
+Resources:
+  # ---------------------------------------------------------
+  # Rollen (v43 + v45): webbservern far bara
+  #   - lasa databasens hemlighet (en enda hemlighet)
+  #   - skriva nya filer under backup/ i backup-bucketen
+  # ---------------------------------------------------------
+  WebRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Prefix}-web-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: las-db-hemligheten
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !ImportValue { "Fn::Sub": "${Prefix}-db-secret-arn" }
+        - PolicyName: skriv-backup
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub
+                  - "arn:aws:s3:::${Bucket}/backup/*"
+                  - Bucket: !ImportValue { "Fn::Sub": "${Prefix}-backup-bucket" }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-web-role" }]
+
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${Prefix}-web-role"
+      Roles: [!Ref WebRole]
+
+  # Privata nyckeln sparas av AWS i SSM Parameter Store under
+  # /ec2/keypair/<KeyPairId>. Den finns aldrig i repot.
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub "${Prefix}-key"
+      KeyType: ed25519
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-key" }]
+
+  # ---------------------------------------------------------
+  # Webbservern. En launch template samlar hur servern ska se ut
+  # (AMI, typ, roll, IMDSv2, user data). Den gar att ateranvanda
+  # for flera servrar och en Auto Scaling-grupp senare.
+  # ---------------------------------------------------------
+  WebLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${Prefix}-web"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPair
+        IamInstanceProfile: { Arn: !GetAtt WebInstanceProfile.Arn }
+        SecurityGroupIds:
+          - !ImportValue { "Fn::Sub": "${Prefix}-web-sg-id" }
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }   # IMDSv2
+        TagSpecifications:
+          - ResourceType: volume
+            Tags: [{ Key: Name, Value: !Sub "${Prefix}-web-disk" }]
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              # Kors en gang vid forsta starten. Logg: /var/log/cloud-init-output.log
+              set -euo pipefail
+              WEBB=/var/www/html
+              export AWS_DEFAULT_REGION=${AWS::Region}
+
+              # Misslyckas ett steg: tala om det for CloudFormation direkt
+              signal() { /opt/aws/bin/cfn-signal -e "$1" --stack ${AWS::StackName} --resource WebServer --region ${AWS::Region} || true; }
+              trap 'signal 1' ERR
+
+              # 1. Paket. Bara HTTPS (443) ar oppet ut.
+              dnf install -y aws-cfn-bootstrap httpd mod_ssl openssl php php-fpm php-mysqlnd php-gd \
+                php-mbstring php-xml mariadb105 amazon-efs-utils jq
+              openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+                -subj "/CN=${Prefix}-web/O=Novatrix AB" \
+                -keyout /etc/pki/tls/private/localhost.key -out /etc/pki/tls/certs/localhost.crt
+              chmod 600 /etc/pki/tls/private/localhost.key
+
+              # 2. EFS pa wp-content, krypterat aven pa vagen (tls), aven efter omstart
+              mkdir -p $WEBB/wp-content
+              echo "${EfsId}:/ $WEBB/wp-content efs _netdev,noresvport,tls 0 0" >> /etc/fstab
+              for i in $(seq 1 20); do
+                mount -a && mountpoint -q $WEBB/wp-content && break
+                echo "EFS inte klar an (forsok $i), vantar 15 s"; sleep 15
+              done
+              mountpoint -q $WEBB/wp-content
+
+              # 3. WordPress. cp -n behaller filer som redan finns pa EFS.
+              cd /tmp
+              curl -sSLo wordpress.tar.gz https://wordpress.org/latest.tar.gz
+              tar -xzf wordpress.tar.gz
+              cp -rn /tmp/wordpress/. $WEBB/
+              rm -rf /tmp/wordpress /tmp/wordpress.tar.gz
+
+              # 4. wp-config.php med losenordet fran Secrets Manager (loggas aldrig)
+              cat > /etc/novatrix.conf <<EOF
+              DB_HOST="${DbHost}"
+              SECRET_ARN="${SecretArn}"
+              BACKUP_BUCKET="${BackupBucket}"
+              export AWS_DEFAULT_REGION="${AWS::Region}"
+              EOF
+              chmod 600 /etc/novatrix.conf
+              HEMLIGHET=""
+              for i in $(seq 1 10); do
+                HEMLIGHET=$(aws secretsmanager get-secret-value --secret-id "${SecretArn}" \
+                  --query SecretString --output text 2>/dev/null) && break
+                sleep 5
+              done
+              [ -n "$HEMLIGHET" ]
+              DB_USER=$(jq -r .username <<<"$HEMLIGHET")
+              DB_PASS=$(jq -r .password <<<"$HEMLIGHET")
+              salt() { openssl rand -base64 48 | tr -d '\n'; }
+              cat > $WEBB/wp-config.php <<EOF
+              <?php
+              // Skapad av user data (v46). Losenordet kommer fran AWS Secrets Manager.
+              define( 'DB_NAME',     'wordpress' );
+              define( 'DB_USER',     '$DB_USER' );
+              define( 'DB_PASSWORD', '$DB_PASS' );
+              define( 'DB_HOST',     '${DbHost}' );
+              define( 'DB_CHARSET',  'utf8mb4' );
+              define( 'DB_COLLATE',  '' );
+              define( 'AUTH_KEY',         '$(salt)' );
+              define( 'SECURE_AUTH_KEY',  '$(salt)' );
+              define( 'LOGGED_IN_KEY',    '$(salt)' );
+              define( 'NONCE_KEY',        '$(salt)' );
+              define( 'AUTH_SALT',        '$(salt)' );
+              define( 'SECURE_AUTH_SALT', '$(salt)' );
+              define( 'LOGGED_IN_SALT',   '$(salt)' );
+              define( 'NONCE_SALT',       '$(salt)' );
+              \$table_prefix = 'wp_';
+              // Publik IP byts nar servern ersatts: anvand adressen i webblasaren
+              if ( ! empty( \$_SERVER['HTTP_HOST'] ) ) {
+                \$schema = ( ! empty( \$_SERVER['HTTPS'] ) && \$_SERVER['HTTPS'] !== 'off' ) ? 'https' : 'http';
+                define( 'WP_HOME',    \$schema . '://' . \$_SERVER['HTTP_HOST'] );
+                define( 'WP_SITEURL', \$schema . '://' . \$_SERVER['HTTP_HOST'] );
+              }
+              define( 'FS_METHOD', 'direct' );
+              define( 'WP_DEBUG', false );
+              if ( ! defined( 'ABSPATH' ) ) { define( 'ABSPATH', __DIR__ . '/' ); }
+              require_once ABSPATH . 'wp-settings.php';
+              EOF
+              unset HEMLIGHET DB_PASS
+              chown -R apache:apache $WEBB
+              chmod 640 $WEBB/wp-config.php
+
+              # 5. Backup av databasen till S3 varje natt
+              cat > /usr/local/bin/novatrix-mysql <<'EOF'
+              #!/bin/bash
+              # sudo /usr/local/bin/novatrix-mysql mysql -e "SHOW TABLES" wordpress
+              set -euo pipefail
+              source /etc/novatrix.conf
+              H=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+              CNF=$(mktemp); chmod 600 "$CNF"; trap 'rm -f "$CNF"' EXIT
+              printf '[client]\nhost=%s\nuser=%s\npassword=%s\n' \
+                "$DB_HOST" "$(jq -r .username <<<"$H")" "$(jq -r .password <<<"$H")" > "$CNF"
+              VERKTYG="$1"; shift
+              "$VERKTYG" --defaults-extra-file="$CNF" "$@"
+              EOF
+              cat > /usr/local/bin/novatrix-backup <<'EOF'
+              #!/bin/bash
+              # Dumpar WordPress-databasen till S3. Livscykelregeln raderar gamla filer.
+              set -euo pipefail
+              source /etc/novatrix.conf
+              FIL="wordpress-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+              TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+              /usr/local/bin/novatrix-mysql mysqldump --single-transaction --routines --triggers wordpress | gzip > "$TMP/$FIL"
+              aws s3 cp "$TMP/$FIL" "s3://$BACKUP_BUCKET/backup/$FIL" --only-show-errors
+              echo "Backup klar: s3://$BACKUP_BUCKET/backup/$FIL ($(du -h "$TMP/$FIL" | cut -f1))"
+              EOF
+              chmod 700 /usr/local/bin/novatrix-mysql /usr/local/bin/novatrix-backup
+              cat > /etc/systemd/system/novatrix-backup.service <<'EOF'
+              [Unit]
+              Description=Backup av Novatrix WordPress-databas till S3
+              After=network-online.target
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/local/bin/novatrix-backup
+              EOF
+              cat > /etc/systemd/system/novatrix-backup.timer <<'EOF'
+              [Unit]
+              Description=Backup av databasen varje natt kl 02:00 svensk tid
+              [Timer]
+              OnCalendar=*-*-* 02:00:00 Europe/Stockholm
+              Persistent=true
+              [Install]
+              WantedBy=timers.target
+              EOF
+              systemctl daemon-reload
+              systemctl enable --now php-fpm httpd novatrix-backup.timer
+
+              # 6. Sjalvtest: installationssidan svarar 200 bara om WordPress
+              #    nar databasen. Forst da far stacken bli klar.
+              KOD=000
+              for i in $(seq 1 24); do
+                KOD=$(curl -s -o /dev/null -w '%{http_code}' -L http://localhost/wp-admin/install.php || true)
+                [ "$KOD" = 200 ] && break
+                sleep 5
+              done
+              [ "$KOD" = 200 ]
+              signal 0
+            - EfsId:        !ImportValue { "Fn::Sub": "${Prefix}-efs-id" }
+              DbHost:       !ImportValue { "Fn::Sub": "${Prefix}-db-endpoint" }
+              SecretArn:    !ImportValue { "Fn::Sub": "${Prefix}-db-secret-arn" }
+              BackupBucket: !ImportValue { "Fn::Sub": "${Prefix}-backup-bucket" }
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal: { Count: 1, Timeout: PT15M }   # vanta pa cfn-signal fran user data
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchTemplate
+        Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-public-subnet-id" }
+      Tags:
+        - { Key: Name, Value: !Sub "${Prefix}-web" }
+        - { Key: Roll, Value: webb }
+
+  # ---------------------------------------------------------
+  # Bastion: enda vagen in for SSH. Ingen roll, ingen user data,
+  # ingen vag ut mot internet (security group och NACL).
+  # ---------------------------------------------------------
+  BastionLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${Prefix}-bastion"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPair
+        SecurityGroupIds:
+          - !ImportValue { "Fn::Sub": "${Prefix}-bastion-sg-id" }
+        MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+
+  Bastion:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BastionLaunchTemplate
+        Version: !GetAtt BastionLaunchTemplate.LatestVersionNumber
+      SubnetId: !ImportValue { "Fn::Sub": "${Prefix}-mgmt-subnet-id" }
+      Tags:
+        - { Key: Name, Value: !Sub "${Prefix}-bastion" }
+        - { Key: Roll, Value: bastion }
+
+Outputs:
+  WebUrl:
+    Description: WordPress. Forsta gangen valjer du sprak, namn och admin-konto.
+    Value: !Sub "http://${WebServer.PublicIp}"
+  WebPublicIp:      { Value: !GetAtt WebServer.PublicIp }
+  WebPrivateIp:     { Value: !GetAtt WebServer.PrivateIp }
+  BastionPublicIp:  { Value: !GetAtt Bastion.PublicIp }
+  KeyPairId:        { Value: !GetAtt KeyPair.KeyPairId }
+  BastionInstanceId: { Value: !Ref Bastion }
+  InstanceId:
+    Value: !Ref WebServer
+    Export: { Name: !Sub "${Prefix}-web-instance-id" }
