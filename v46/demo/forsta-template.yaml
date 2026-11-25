@@ -1,0 +1,11 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "A first template, one VPC for the demo. Stack name: novatrix-demo"
+
+Resources:
+  DemoVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.99.0.0/16
+      Tags:
+        - Key: Name
+          Value: novatrix-demo-vpc

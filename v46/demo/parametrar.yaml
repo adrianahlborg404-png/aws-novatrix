@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "The demo VPC with a parameter and an output. Stack name: novatrix-demo"
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: novatrix-demo
+    AllowedPattern: "[a-z][a-z0-9-]*"
+    Description: Name prefix, e.g. novatrix-demo
+
+Resources:
+  DemoVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.99.0.0/16
+      Tags:
+        - Key: Name
+          Value: !Sub ${Prefix}-vpc
+        # Step 2 of the demo: add this tag, then look at the change set
+        # - Key: Course
+        #   Value: MOV25
+
+Outputs:
+  VpcId:
+    Description: The id CloudFormation got back
+    Value: !Ref DemoVpc
